@@ -5,16 +5,16 @@ use parking_lot_core::{self, SpinWait, UnparkToken, DEFAULT_PARK_TOKEN};
 // UnparkToken used to indicate that reference is stored. not used only to have a value to set in unpark_all
 const TOKEN_VALUE_SET: UnparkToken = UnparkToken(0);
 
-/// This bit is zero in `state_and_data` of a `OnceReference` when `state_or_reference` contains a reference.
+/// This bit is zero in `state_and_data` of a `lockOrRef` when `state_or_reference` contains a reference.
 const REF_UNSET_BIT: usize = 0b01;
-/// This bit is set in `state_and_data` of a `OnceReference` when that mutex is locked by some thread.
+/// This bit is set in `state_and_data` of a `lockOrRef` when that mutex is locked by some thread.
 const LOCKED_BIT: usize = 0b10;
-/// This bit is set in the `state_and_data` of a `OnceReference` just before parking a thread.
+/// This bit is set in the `state_and_data` of a `lockOrRef` just before parking a thread.
 /// A thread is being parked if it wants to lock the mutex, but it is currently being held by some other thread.
 const PARKED_BIT: usize = 0b100;
 
 /// Once Reference type backed by the parking lot.
-pub(crate) struct OnceReference {
+pub(crate) struct lockOrRef {
     /// This atomic integer holds the current state or the reference.
     ///
     /// # State table:
@@ -42,13 +42,13 @@ pub(crate) struct OnceReference {
     state_or_reference: AtomicUsize,
 }
 
-impl Default for OnceReference {
+impl Default for lockOrRef {
     fn default() -> Self {
-        OnceReference { state_or_reference: AtomicUsize::new(0b1) }
+        lockOrRef { state_or_reference: AtomicUsize::new(0b1) }
     }
 }
 
-impl OnceReference {
+impl lockOrRef {
     pub(crate) fn intern(
         &self,
         hash: u64,

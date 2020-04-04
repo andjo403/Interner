@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-cfg_if! {
+cfg_if::cfg_if! {
     // Use the SSE2 implementation if possible: it allows us to scan 16 buckets
     // at once instead of 8. We don't bother with AVX since it would require
     // runtime dispatch and wouldn't gain us much anyways: the probability of
@@ -25,10 +25,10 @@ cfg_if! {
 
 mod bitmask;
 use bitmask::BitMaskIter;
-mod once_reference;
+mod lock_or_ref;
 
 use self::imp::match_byte;
-use crate::raw::once_reference::OnceReference;
+use crate::raw::lock_or_ref::lockOrRef;
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
 
@@ -126,7 +126,7 @@ fn bucket_mask_to_capacity(bucket_mask: usize) -> usize {
 #[repr(align(64))]
 struct Group {
     meta_data: AtomicU64,
-    pub refs: [OnceReference; 7],
+    pub refs: [lockOrRef; 7],
 }
 
 impl Group {
@@ -137,7 +137,7 @@ impl Group {
     pub fn get_metadata(&self) -> u64 {
         self.meta_data.load(Ordering::Relaxed)
     }
-    fn get_reference(&mut self, index: usize) -> &mut OnceReference {
+    fn get_reference(&mut self, index: usize) -> &mut lockOrRef {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
     pub fn cas_metadata(&self, current: u64, new: u64) -> u64 {
@@ -150,13 +150,13 @@ impl Default for Group {
         Group {
             meta_data: AtomicU64::new(0),
             refs: [
-                OnceReference::default(),
-                OnceReference::default(),
-                OnceReference::default(),
-                OnceReference::default(),
-                OnceReference::default(),
-                OnceReference::default(),
-                OnceReference::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
+                lockOrRef::default(),
             ],
         }
     }

@@ -6,12 +6,9 @@
 
 #![feature(core_intrinsics)]
 
-#[macro_use]
-mod macros;
-
 mod raw;
 
 /// A interner implemented with quadratic probing and SIMD lookup.
 pub mod interner;
 
-pub use interner::Interner;
+pub use crate::interner::Interner;

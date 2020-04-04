@@ -30,7 +30,7 @@ impl<T> Interner<T, DefaultHashBuilder> {
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
+    /// use interner::Interner;
     /// let mut interner: Interner<i32> = Interner::new();
     /// ```
     #[inline]
@@ -46,7 +46,7 @@ impl<T> Interner<T, DefaultHashBuilder> {
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
+    /// use interner::Interner;
     /// let mut interner: Interner<i32> = Interner::with_capacity(10);
     /// ```
     #[inline]
@@ -69,8 +69,8 @@ impl<T, S> Interner<T, S> {
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
-    /// use coninterner::interner::DefaultHashBuilder;
+    /// use interner::Interner;
+    /// use interner::interner::DefaultHashBuilder;
     ///
     /// let s = DefaultHashBuilder::default();
     /// let mut interner: Interner<i32> = Interner::with_hasher(s);
@@ -97,8 +97,8 @@ impl<T, S> Interner<T, S> {
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
-    /// use coninterner::interner::DefaultHashBuilder;
+    /// use interner::Interner;
+    /// use interner::interner::DefaultHashBuilder;
     ///
     /// let s = DefaultHashBuilder::default();
     /// let mut interner: Interner<i32> = Interner::with_capacity_and_hasher(10, s);
@@ -118,8 +118,8 @@ impl<T, S> Interner<T, S> {
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
-    /// use coninterner::interner::DefaultHashBuilder;
+    /// use interner::Interner;
+    /// use interner::interner::DefaultHashBuilder;
     ///
     /// let s = DefaultHashBuilder::default();
     /// let mut interner: Interner<i32> = Interner::with_capacity_and_hasher(10, s);
@@ -141,7 +141,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use coninterner::Interner;
+    /// use interner::Interner;
     ///
     /// let interner: Interner<&i32> = Interner::with_capacity(2);
     /// let value1 :i32 = 42;

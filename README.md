@@ -1,4 +1,4 @@
-coninterner
+interner
 ============
 
 This library provides an concurrent add only interner that looks only the value with the same hash during interning.
@@ -10,7 +10,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-coninterner = "0.1"
+interner = "0.1"
 ```
 
 ## License

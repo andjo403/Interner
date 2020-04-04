@@ -1,6 +1,6 @@
-use coninterner::Interner as Inter;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fxhash::FxBuildHasher;
+use interner::Interner as Inter;
 use rayon::prelude::*;
 
 type Interner<T> = Inter<T, FxBuildHasher>;
