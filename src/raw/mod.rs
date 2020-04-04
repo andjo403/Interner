@@ -28,7 +28,7 @@ use bitmask::BitMaskIter;
 mod lock_or_ref;
 
 use self::imp::match_byte;
-use crate::raw::lock_or_ref::lockOrRef;
+use crate::raw::lock_or_ref::LockOrRef;
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
 
@@ -126,7 +126,7 @@ fn bucket_mask_to_capacity(bucket_mask: usize) -> usize {
 #[repr(align(64))]
 struct Group {
     meta_data: AtomicU64,
-    pub refs: [lockOrRef; 7],
+    pub refs: [LockOrRef; 7],
 }
 
 impl Group {
@@ -137,7 +137,7 @@ impl Group {
     pub fn get_metadata(&self) -> u64 {
         self.meta_data.load(Ordering::Relaxed)
     }
-    fn get_reference(&mut self, index: usize) -> &mut lockOrRef {
+    fn get_reference(&mut self, index: usize) -> &mut LockOrRef {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
     pub fn cas_metadata(&self, current: u64, new: u64) -> u64 {
@@ -150,13 +150,13 @@ impl Default for Group {
         Group {
             meta_data: AtomicU64::new(0),
             refs: [
-                lockOrRef::default(),
-                lockOrRef::default(),
-                lockOrRef::default(),
-                lockOrRef::default(),
-                lockOrRef::default(),
-                lockOrRef::default(),
-                lockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
+                LockOrRef::default(),
             ],
         }
     }
