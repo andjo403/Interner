@@ -16,8 +16,8 @@ pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: 
 }
 /// A concurrent interner implemented with quadratic probing and SIMD lookup.
 pub struct Interner<T, S = DefaultHashBuilder> {
-    pub(crate) hash_builder: S,
-    pub(crate) raw_interner: AtomicPtr<RawInterner>,
+    hash_builder: S,
+    raw_interner: AtomicPtr<RawInterner>,
     phantom: PhantomData<T>,
 }
 

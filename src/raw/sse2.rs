@@ -16,6 +16,6 @@ pub(crate) fn match_byte(valid_bits: u64, hashes: u64, value: u8) -> BitMaskIter
     unsafe {
         let hashes = x86::_mm_set_epi64x(0, hashes as i64);
         let cmp = x86::_mm_cmpeq_epi8(hashes, x86::_mm_set1_epi8(value as i8));
-        BitMaskIter::new(x86::_mm_movemask_epi8(cmp) as u64 & 0x7f & valid_bits, BITMASK_STRIDE)
+        BitMaskIter::new(x86::_mm_movemask_epi8(cmp) as u64 & valid_bits, BITMASK_STRIDE)
     }
 }
