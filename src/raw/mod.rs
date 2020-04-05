@@ -134,12 +134,15 @@ impl Group {
         let arr = [Group::default()];
         Box::new(arr)
     }
+    #[inline]
     pub fn get_metadata(&self) -> u64 {
         self.meta_data.load(Ordering::Relaxed)
     }
+    #[inline]
     fn get_reference(&mut self, index: usize) -> &mut LockOrRef {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
+    #[inline]
     pub fn cas_metadata(&self, current: u64, new: u64) -> u64 {
         self.meta_data.compare_and_swap(current, new, Ordering::Relaxed)
     }
