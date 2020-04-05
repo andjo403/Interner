@@ -135,8 +135,8 @@ impl Group {
         Box::new(arr)
     }
     #[inline]
-    pub fn get_metadata(&self) -> u64 {
-        self.meta_data.load(Ordering::Relaxed)
+    pub unsafe fn get_metadata_optimistically(&self) -> u64 {
+        *self.meta_data.as_mut_ptr()
     }
     #[inline]
     fn get_reference(&mut self, index: usize) -> &mut LockOrRef {
@@ -239,7 +239,7 @@ impl RawInterner {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             let group = self.get_group(pos);
-            let group_meta_data = group.get_metadata();
+            let group_meta_data = unsafe { group.get_metadata_optimistically() };
             let valid_bits = (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let reference = group.get_reference(index);

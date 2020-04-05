@@ -75,18 +75,18 @@ impl LockOrRef {
         hash: u64,
         eq: impl Copy + FnOnce(UsizeTReference) -> bool,
     ) -> Option<UsizeTReference> {
-        let state = self.state_or_reference.load(Ordering::Relaxed);
+        let state = unsafe { *self.state_or_reference.as_mut_ptr() };
 
-        if state == 0 {
-            return None;
-        } else if state & LOCKED_BIT == 0 {
-            let result = UsizeTReference(state);
-            if eq(result) {
-                return Some(result);
+        if state != 0 {
+            if state & LOCKED_BIT == 0 {
+                let result = UsizeTReference(state);
+                if eq(result) {
+                    return Some(result);
+                }
+                return None;
+            } else if state & !3 != (hash.wrapping_shl(2) as usize) {
+                return None;
             }
-            return None;
-        } else if state & !3 != (hash.wrapping_shl(2) as usize) {
-            return None;
         }
         self.wait_on_lock_release(eq)
     }
