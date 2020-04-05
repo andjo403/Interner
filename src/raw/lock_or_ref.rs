@@ -73,7 +73,7 @@ impl LockOrRef {
         hash: u64,
         eq: impl Copy + FnOnce(UsizeTReference) -> bool,
     ) -> Option<UsizeTReference> {
-        let mut state = self.state_or_reference.load(Ordering::Relaxed);
+        let state = self.state_or_reference.load(Ordering::Relaxed);
 
         if state == 0 {
             return None;
@@ -86,7 +86,15 @@ impl LockOrRef {
         } else if state & !3 != (hash.wrapping_shl(2) as usize) {
             return None;
         }
+        self.wait_on_lock_release(eq)
+    }
 
+    #[cold]
+    fn wait_on_lock_release(
+        &self,
+        eq: impl Copy + FnOnce(UsizeTReference) -> bool,
+    ) -> Option<UsizeTReference> {
+        let mut state = self.state_or_reference.load(Ordering::Relaxed);
         let mut spinwait = SpinWait::new();
         loop {
             // when the reference is stored return it
