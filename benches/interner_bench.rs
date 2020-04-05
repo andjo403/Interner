@@ -62,5 +62,46 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, intern_u64refs, get_already_interned_u64refs);
+fn single_task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
+    let map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    (0..ITER).for_each(|i: u64| {
+        map.intern_ref(&i, || values.get(i as usize).unwrap());
+    });
+    map
+}
+
+fn single_intern_u64refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("single_intern_u64refs");
+    group.throughput(Throughput::Elements(ITER as u64));
+    let values: Vec<u64> = (0..ITER).collect();
+    group.bench_function("single_task_intern_u64refs", |bencher| {
+        bencher.iter(|| single_task_intern_u64refs(values.as_slice()))
+    });
+    group.finish();
+}
+
+fn single_task_get_interned_u64refs(interner: &mut Interner<&'_ u64>) {
+    (0..ITER).for_each(|i: u64| {
+        interner.intern_ref(&i, || unimplemented!());
+    });
+}
+
+fn single_get_already_interned_u64refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("single_get_already_interned_u64refs");
+    group.throughput(Throughput::Elements(ITER as u64));
+    let values: Vec<u64> = (0..ITER).collect();
+    let mut interner = task_intern_u64refs(values.as_slice());
+    group.bench_function("single_task_get_interned_u64refs", |bencher| {
+        bencher.iter(|| single_task_get_interned_u64refs(&mut interner))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    single_intern_u64refs,
+    single_get_already_interned_u64refs,
+    intern_u64refs,
+    get_already_interned_u64refs
+);
 criterion_main!(benches);
