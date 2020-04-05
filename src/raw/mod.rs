@@ -184,7 +184,7 @@ impl RawInterner {
     /// In effect this returns a table with exactly 1 bucket. However we can
     /// leave the data pointer dangling since that bucket is never written to
     /// due to our load factor forcing us to always have at least 1 free bucket.
-    #[cfg_attr(feature = "inline-more", inline)]
+    #[inline]
     pub fn new() -> Self {
         Self { groups: Group::empty(), bucket_mask: 0, growth_left: AtomicUsize::new(0) }
     }
@@ -192,7 +192,7 @@ impl RawInterner {
     /// Allocates a new hash table with the given number of buckets.
     ///
     /// The control bytes are left uninitialized.
-    #[cfg_attr(feature = "inline-more", inline)]
+    #[inline]
     fn new_uninitialized(buckets: usize) -> Self {
         debug_assert!(buckets.is_power_of_two());
         Self {
@@ -219,11 +219,11 @@ impl RawInterner {
     /// This iterator never terminates, but is guaranteed to visit each bucket
     /// group exactly once. The loop using `probe_seq` must terminate upon
     /// reaching a group containing an empty bucket.
-    #[cfg_attr(feature = "inline-more", inline)]
+    #[inline]
     fn probe_seq(&self, hash: u64) -> ProbeSeq {
         ProbeSeq { bucket_mask: self.bucket_mask, pos: h1(hash) & self.bucket_mask, stride: 0 }
     }
-
+    #[inline]
     fn get_group(&mut self, index: usize) -> &mut Group {
         unsafe { self.groups.get_unchecked_mut(index) }
     }

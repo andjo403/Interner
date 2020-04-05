@@ -41,6 +41,7 @@ impl Default for LockOrRef {
 }
 
 impl LockOrRef {
+    #[inline]
     pub(crate) fn intern(
         &self,
         hash: u64,
@@ -68,6 +69,7 @@ impl LockOrRef {
         Some(result)
     }
 
+    #[inline]
     pub(crate) fn get(
         &self,
         hash: u64,
