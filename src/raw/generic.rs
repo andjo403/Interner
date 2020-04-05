@@ -7,10 +7,7 @@ pub const BITMASK_MASK: u64 = 0x80_8080_8080_8080;
 /// Helper function to replicate a byte across a `u64`.
 #[inline]
 fn repeat(byte: u8) -> u64 {
-    let repeat = u64::from(byte);
-    let repeat = repeat | repeat.wrapping_shl(8);
-    let repeat = repeat | repeat.wrapping_shl(16);
-    repeat | repeat.wrapping_shl(32)
+    u64::from_ne_bytes([byte; 8])
 }
 
 /// Returns a `BitMask` indicating all bytes in the group which *may*
