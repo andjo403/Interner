@@ -53,8 +53,8 @@ impl LockOrRef {
             .compare_exchange(
                 NO_REF_NO_LOCK,
                 hash.wrapping_shl(2) as usize | LOCKED_BIT,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             )
             .is_err()
         {
@@ -96,16 +96,18 @@ impl LockOrRef {
         &self,
         eq: impl Copy + FnOnce(UsizeTReference) -> bool,
     ) -> Option<UsizeTReference> {
-        let mut state = self.state_or_reference.load(Ordering::Relaxed);
+        let mut state = self.state_or_reference.load(Ordering::SeqCst);
         let mut spinwait = SpinWait::new();
         loop {
             // when the reference is stored return it
-            if state & LOCKED_BIT == 0 {
-                let result = UsizeTReference(state);
-                if eq(result) {
-                    return Some(result);
+            if state != 0 {
+                if state & LOCKED_BIT == 0 {
+                    let result = UsizeTReference(state);
+                    if eq(result) {
+                        return Some(result);
+                    }
+                    return None;
                 }
-                return None;
             }
 
             // If there is no queue, try spinning a few times

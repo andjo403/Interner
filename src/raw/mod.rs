@@ -92,6 +92,7 @@ impl Iterator for ProbeSeq {
 /// Returns `None` if an overflow occurs.
 #[inline]
 fn capacity_to_buckets(cap: usize) -> Option<usize> {
+    let cap = cap / 7; // as there is 7 elemntes in each bucket
     let adjusted_cap = if cap < 8 {
         // Need at least 1 free bucket on small tables
         cap + 1
@@ -143,8 +144,8 @@ impl Group {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
     #[inline]
-    pub fn cas_metadata(&self, current: u64, new: u64) -> u64 {
-        self.meta_data.compare_and_swap(current, new, Ordering::Relaxed)
+    pub fn cas_metadata(&self, current: u64, new: u64) -> Option<u64> {
+        self.meta_data.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).err()
     }
 }
 
@@ -255,12 +256,21 @@ impl RawInterner {
             // the group was not full when the metadata was fetched but new values can have been added
             // during the search but even if the metadata have been updated and the index is now used the
             // value needs to be check as it can be the value that shall be added
-            let iter = BitMaskIter::new(!valid_bits, 1);
+            let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
             let mut group_meta_data = group_meta_data;
             for index in iter {
                 let new_group_meta_data =
                     group_meta_data | (1 << (64 - 8 + index)) | ((h2 as u64) << (index * 8));
-                group_meta_data = group.cas_metadata(group_meta_data, new_group_meta_data);
+                if let Some(new_group_meta_data) =
+                    group.cas_metadata(group_meta_data, new_group_meta_data)
+                {
+                    let reference = group.get_reference(index);
+                    group_meta_data = new_group_meta_data;
+                    if let Some(result) = reference.get(hash, eq) {
+                        return result;
+                    }
+                    continue;
+                }
                 let reference = group.get_reference(index);
                 if let Some(result) = reference.intern(hash, eq, make) {
                     return result;

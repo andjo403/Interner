@@ -209,7 +209,7 @@ fn intern_ref() {
     assert_eq!(&value1, result);
     let result = interner.intern_ref(&value2, || &value2);
     assert_eq!(&value2, result);
-    let result = interner.intern_ref(&value2, || &value2);
+    let result = interner.intern_ref(&value2, || unimplemented!());
     assert_eq!(&value2, result);
 
     let result = interner.intern_ref(&value3, || &value3);
@@ -246,4 +246,22 @@ fn intern_ref2() {
         assert_eq!(*reference, *result);
         assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
     }
+    for index in vector.iter() {
+        let reference = unsafe { &*slice.offset(*index) };
+        let result = map.intern_ref(index, || unimplemented!());
+        assert_eq!(*reference, *result);
+        assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
+    }
+}
+
+#[test]
+fn intern_ref3() {
+    use fxhash::FxBuildHasher;
+    use rayon::prelude::*;
+    const ITER: u64 = 32 * 1024;
+    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    let values: Vec<u64> = (0..ITER).collect();
+    (0..ITER).into_par_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || values.get(i as usize).unwrap());
+    });
 }
