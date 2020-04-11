@@ -6,6 +6,8 @@
 
 #![feature(core_intrinsics)]
 #![feature(atomic_mut_ptr)]
+#![feature(alloc_layout_extra)]
+#![feature(dropck_eyepatch)]
 
 mod raw;
 

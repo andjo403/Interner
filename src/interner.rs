@@ -1,4 +1,4 @@
-use crate::raw::{RawInterner, UsizeTReference};
+use crate::raw::RawInterner;
 use core::hash::{BuildHasher, Hash, Hasher};
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -17,7 +17,7 @@ pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: 
 /// A concurrent interner implemented with quadratic probing and SIMD lookup.
 pub struct Interner<T, S = DefaultHashBuilder> {
     hash_builder: S,
-    raw_interner: AtomicPtr<RawInterner>,
+    raw_interner: AtomicPtr<RawInterner<T>>,
     phantom: PhantomData<T>,
 }
 
@@ -143,9 +143,9 @@ where
     /// ```
     /// use interner::Interner;
     ///
-    /// let interner: Interner<&i32> = Interner::with_capacity(2);
     /// let value1 :i32 = 42;
     /// let value2 :i32 = 300;
+    /// let interner: Interner<&i32> = Interner::with_capacity(2);
     /// let result = interner.intern_ref(&value1,|| {&value1});
     /// assert_eq!(&value1,result);
     /// let result = interner.intern_ref(&value2,|| {&value2});
@@ -154,25 +154,41 @@ where
     /// assert_eq!(&value2,result);
     /// ```
     #[inline]
-    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl Copy + FnOnce() -> T) -> T
+    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl FnOnce() -> T) -> T
     where
         T: Sync + Send + Borrow<Q> + Copy,
         Q: Sync + Send + Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let eq =
-            |stored_value: UsizeTReference| value.eq(unsafe { &*(stored_value.0 as *const Q) });
-        let make = || unsafe { TransmuteHack { type_t: make() }.usize_t_reference };
         let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Acquire) };
-        let result = raw_interner.intern(hash, eq, make);
-        let result = unsafe { TransmuteHack { usize_t_reference: result }.type_t };
-        result
+        raw_interner.intern(hash, value, make)
     }
-}
 
-union TransmuteHack<T: Copy> {
-    usize_t_reference: UsizeTReference,
-    type_t: T,
+    /// Get reference to the interned value.
+    /// will panic if the value is not pressent
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interner::Interner;
+    ///
+    /// let value1 :i32 = 42;
+    /// let interner: Interner<&i32> = Interner::with_capacity(2);
+    /// let result = interner.intern_ref(&value1,|| {&value1});
+    /// assert_eq!(&value1,result);
+    /// let result = interner.get(&value1);
+    /// assert_eq!(&value1,result.unwrap());
+    /// ```
+    #[inline]
+    pub fn get<Q: Sized>(&self, value: &Q) -> Option<T>
+    where
+        T: Sync + Send + Borrow<Q> + Copy,
+        Q: Sync + Send + Hash + Eq + std::fmt::Debug,
+    {
+        let hash = make_hash(&self.hash_builder, value);
+        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Acquire) };
+        raw_interner.get(hash, value)
+    }
 }
 
 impl<T, S> Default for Interner<T, S>
@@ -196,15 +212,15 @@ impl<T, S> Drop for Interner<T, S> {
 #[test]
 fn intern_ref() {
     use super::Interner;
-
-    let interner: Interner<&i32> = Interner::with_capacity(2);
     let value1: i32 = 42;
-    let value2: i32 = 300;
+    let value2: i32 = 0;
     let value3: i32 = 31;
     let value4: i32 = 32;
     let value5: i32 = 33;
     let value6: i32 = 34;
-    let value7: i32 = 35;
+    let value7: i32 = 42;
+    let interner: Interner<&i32> = Interner::with_capacity(7);
+
     let result = interner.intern_ref(&value1, || &value1);
     assert_eq!(&value1, result);
     let result = interner.intern_ref(&value2, || &value2);
@@ -220,7 +236,7 @@ fn intern_ref() {
     assert_eq!(&value5, result);
     let result = interner.intern_ref(&value6, || &value6);
     assert_eq!(&value6, result);
-    let result = interner.intern_ref(&value7, || &value7);
+    let result = interner.intern_ref(&value7, || unimplemented!());
     assert_eq!(&value7, result);
 }
 
@@ -228,10 +244,7 @@ fn intern_ref() {
 fn intern_ref2() {
     use fxhash::FxBuildHasher;
     const ITER: isize = 32 * 1024;
-    let map = Interner::<&isize, FxBuildHasher>::with_capacity_and_hasher(
-        ITER as usize,
-        FxBuildHasher::default(),
-    );
+
     let mut vector = Vec::<isize>::with_capacity(ITER as usize + 100);
     for i in 0..ITER {
         vector.push(i);
@@ -240,28 +253,66 @@ fn intern_ref2() {
     let vector2 = vector.clone();
     let slice = vector2.as_ptr();
 
+    let interner = Interner::<&isize, FxBuildHasher>::with_capacity_and_hasher(
+        ITER as usize,
+        FxBuildHasher::default(),
+    );
+
     for index in vector.iter() {
         let reference = unsafe { &*slice.offset(*index) };
-        let result = map.intern_ref(index, || index);
+        let result = interner.intern_ref(index, || index);
         assert_eq!(*reference, *result);
         assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
     }
     for index in vector.iter() {
         let reference = unsafe { &*slice.offset(*index) };
-        let result = map.intern_ref(index, || unimplemented!());
+        let result = interner.intern_ref(index, || unimplemented!());
         assert_eq!(*reference, *result);
         assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
     }
 }
 
 #[test]
+fn single_threaded_intern_ref3() {
+    use fxhash::FxBuildHasher;
+    const ITER: u64 = 1024;
+    let values: Vec<u64> = (0..ITER).collect();
+    let values = values.into_boxed_slice();
+
+    let hashbuilder = FxBuildHasher::default();
+    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    (1..ITER).into_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || values.get(i as usize).unwrap());
+        interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+    });
+
+    (1..ITER).into_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+    });
+}
+
+#[test]
 fn intern_ref3() {
     use fxhash::FxBuildHasher;
     use rayon::prelude::*;
+    use std::sync::Arc;
     const ITER: u64 = 32 * 1024;
-    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    let values: Vec<u64> = (0..ITER).collect();
-    (0..ITER).into_par_iter().for_each(|i: u64| {
-        interner.intern_ref(&i, || values.get(i as usize).unwrap());
+    let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
+
+    let interner: Interner<&u64, FxBuildHasher> =
+        Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    (1..ITER).into_par_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
+        let result = interner.intern_ref(&i, || unimplemented!());
+        assert_eq!(i, *result);
+    });
+
+    (1..ITER).into_iter().for_each(|i: u64| {
+        let result = interner.get(&i);
+        assert_eq!(i, *result.unwrap());
     });
 }

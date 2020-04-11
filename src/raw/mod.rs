@@ -1,4 +1,8 @@
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use std::borrow::Borrow;
+use std::mem;
+use std::ptr::NonNull;
 
 cfg_if::cfg_if! {
     // Use the SSE2 implementation if possible: it allows us to scan 16 buckets
@@ -25,15 +29,12 @@ cfg_if::cfg_if! {
 
 mod bitmask;
 use bitmask::BitMaskIter;
-mod lock_or_ref;
+mod meta_data;
 
 use self::imp::match_byte;
-use crate::raw::lock_or_ref::LockOrRef;
+use meta_data::{MetaData, ReserveResult};
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
-
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct UsizeTReference(pub(crate) usize);
 
 /// Primary hash function, used to select the initial bucket to probe from.
 #[inline]
@@ -56,13 +57,13 @@ fn h2(hash: u64) -> u8 {
 }
 
 /// Probe sequence based on triangular numbers, which is guaranteed (since our
-/// table size is a power of two) to visit every group of elements exactly once.
+/// table size is a power of two) to visit every bucket of elements exactly once.
 ///
-/// A triangular probe has us jump by 1 more group every time. So first we
-/// jump by 1 group (meaning we just continue our linear scan), then 2 groups
-/// (skipping over 1 group), then 3 groups (skipping over 2 groups), and so on.
+/// A triangular probe has us jump by 1 more bucket every time. So first we
+/// jump by 1 bucket (meaning we just continue our linear scan), then 2 buckets
+/// (skipping over 1 bucket), then 3 buckets (skipping over 2 buckets), and so on.
 ///
-/// Proof that the probe will visit every group in the table:
+/// Proof that the probe will visit every bucket in the table:
 /// <https://fgiesen.wordpress.com/2015/02/22/triangular-numbers-mod-2n/>
 struct ProbeSeq {
     bucket_mask: usize,
@@ -107,79 +108,67 @@ fn capacity_to_buckets(cap: usize) -> Option<usize> {
     // Any overflows will have been caught by the checked_mul. Also, any
     // rounding errors from the division above will be cleaned up by
     // next_power_of_two (which can't overflow because of the previous divison).
-    Some(adjusted_cap.next_power_of_two())
+    dbg!(Some(adjusted_cap.next_power_of_two()))
 }
 
 /// Returns the maximum effective capacity for the given bucket mask, taking
 /// the maximum load factor into account.
 #[inline]
 fn bucket_mask_to_capacity(bucket_mask: usize) -> usize {
+    let bucket_mask = dbg!(bucket_mask) * 7;
     if bucket_mask < 8 {
         // For tables with 1/2/4/8 buckets, we always reserve one empty slot.
         // Keep in mind that the bucket mask is one less than the bucket count.
-        bucket_mask
+        dbg!(bucket_mask)
     } else {
         // For larger tables we reserve 12.5% of the slots as empty.
-        ((bucket_mask + 1) / 8) * 7
+        dbg!(((bucket_mask + 1) / 8) * 7)
     }
 }
 
 #[repr(align(64))]
-struct Group {
-    meta_data: AtomicU64,
-    pub refs: [LockOrRef; 7],
+struct Bucket<T> {
+    pub meta_data: MetaData,
+    pub refs: [T; 7],
 }
 
-impl Group {
-    pub fn empty() -> Box<[Self]> {
-        let arr = [Group::default()];
-        Box::new(arr)
-    }
+impl<T> Bucket<T> {
     #[inline]
-    pub unsafe fn get_metadata_optimistically(&self) -> u64 {
-        *self.meta_data.as_mut_ptr()
-    }
-    #[inline]
-    fn get_reference(&mut self, index: usize) -> &mut LockOrRef {
+    fn get_ref(&mut self, index: usize) -> &mut T {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
-    #[inline]
-    pub fn cas_metadata(&self, current: u64, new: u64) -> Option<u64> {
-        self.meta_data.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).err()
-    }
 }
 
-impl Default for Group {
-    fn default() -> Self {
-        Group {
-            meta_data: AtomicU64::new(0),
-            refs: [
-                LockOrRef::default(),
-                LockOrRef::default(),
-                LockOrRef::default(),
-                LockOrRef::default(),
-                LockOrRef::default(),
-                LockOrRef::default(),
-                LockOrRef::default(),
-            ],
-        }
-    }
+#[inline]
+fn get_valid_bits(group_meta_data: u64) -> u64 {
+    (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)
 }
 
 /// A raw hash table with an unsafe API.
-pub(crate) struct RawInterner {
+pub(crate) struct RawInterner<T> {
     // Mask to get an index from a hash value. The value is one less than the
     // number of buckets in the table.
     bucket_mask: usize,
 
     // Pointer to the array of control bytes
-    groups: Box<[Group]>,
+    buckets: NonNull<Bucket<T>>,
 
     // Number of elements that can be inserted before we need to grow the table
     growth_left: AtomicUsize,
 }
 
-impl RawInterner {
+impl<T> Drop for RawInterner<T> {
+    fn drop(&mut self) {
+        if self.bucket_mask != 0 {
+            let layout = Layout::array::<Bucket<T>>(self.bucket_mask + 1)
+                .expect("Interner capacity overflow");
+            let ptr = self.buckets.as_ptr() as *mut u8;
+            unsafe { dealloc(ptr, layout) };
+        }
+    }
+}
+
+impl<T> RawInterner<T> {
     /// Creates a new empty hash table without allocating any memory.
     ///
     /// In effect this returns a table with exactly 1 bucket. However we can
@@ -187,7 +176,13 @@ impl RawInterner {
     /// due to our load factor forcing us to always have at least 1 free bucket.
     #[inline]
     pub fn new() -> Self {
-        Self { groups: Group::empty(), bucket_mask: 0, growth_left: AtomicUsize::new(0) }
+        static mut STATIC_BUCKET: [u64; 8] = [0; 8];
+        Self {
+            // SAFTY shall not mutate this as the capacity is to smal
+            buckets: NonNull::new(unsafe { STATIC_BUCKET }.as_mut_ptr() as *mut Bucket<T>).unwrap(),
+            bucket_mask: 0,
+            growth_left: AtomicUsize::new(0),
+        }
     }
 
     /// Allocates a new hash table with the given number of buckets.
@@ -196,8 +191,12 @@ impl RawInterner {
     #[inline]
     fn new_uninitialized(buckets: usize) -> Self {
         debug_assert!(buckets.is_power_of_two());
+        debug_assert!(mem::size_of::<Bucket<T>>() == 64);
+
+        let layout = Layout::array::<Bucket<T>>(buckets).expect("Interner capacity overflow");
         Self {
-            groups: (0..buckets).map(|_| Group::default()).collect::<Vec<_>>().into_boxed_slice(),
+            buckets: NonNull::new(unsafe { alloc_zeroed(layout) } as *mut Bucket<T>)
+                .unwrap_or_else(|| handle_alloc_error(layout)),
             bucket_mask: buckets - 1,
             growth_left: AtomicUsize::new(bucket_mask_to_capacity(buckets - 1)),
         }
@@ -218,64 +217,115 @@ impl RawInterner {
     /// Returns an iterator for a probe sequence on the table.
     ///
     /// This iterator never terminates, but is guaranteed to visit each bucket
-    /// group exactly once. The loop using `probe_seq` must terminate upon
-    /// reaching a group containing an empty bucket.
+    /// exactly once. The loop using `probe_seq` must terminate upon
+    /// reaching a bucket that not is full.
     #[inline]
     fn probe_seq(&self, hash: u64) -> ProbeSeq {
         ProbeSeq { bucket_mask: self.bucket_mask, pos: h1(hash) & self.bucket_mask, stride: 0 }
     }
-    #[inline]
-    fn get_group(&mut self, index: usize) -> &mut Group {
-        unsafe { self.groups.get_unchecked_mut(index) }
+
+    unsafe fn bucket(&self, index: usize) -> &mut Bucket<T> {
+        debug_assert!(index < self.bucket_mask + 1);
+        &mut *self.buckets.as_ptr().add(index)
     }
 
     /// Searches for an element in the table.
     #[inline]
-    pub(crate) fn intern(
-        &mut self,
-        hash: u64,
-        eq: impl Copy + FnOnce(UsizeTReference) -> bool,
-        make: impl Copy + FnOnce() -> UsizeTReference,
-    ) -> UsizeTReference {
+    pub(crate) fn intern<Q>(&mut self, hash: u64, value: &Q, make: impl FnOnce() -> T) -> T
+    where
+        T: Sync + Send + Borrow<Q> + Copy,
+        Q: Sync + Send + Eq,
+    {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
-            let group = self.get_group(pos);
-            let group_meta_data = unsafe { group.get_metadata_optimistically() };
-            let valid_bits = (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8);
+            let bucket = unsafe { self.bucket(pos) };
+            let group_meta_data = unsafe { bucket.meta_data.get_metadata_optimistically() };
+            let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
-                let reference = group.get_reference(index);
-                if let Some(result) = reference.get(hash, eq) {
-                    return result;
+                let result = bucket.get_ref(index);
+                if (*value).eq((*result).borrow()) {
+                    return *result;
                 }
             }
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
-                // not found this group and the group is full try the new group
+                // not found this bucket and the bucket is full try the new bucket
                 continue;
             }
 
-            // the group was not full when the metadata was fetched but new values can have been added
+            let mut old = self.growth_left.load(Ordering::SeqCst);
+            loop {
+                if old == 1 {
+                    unimplemented!("resize")
+                }
+                match self.growth_left.compare_exchange_weak(
+                    old,
+                    old - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(x) => old = x,
+                }
+            }
+
+            // the bucket was not full when the metadata was fetched but new values can have been added
             // during the search but even if the metadata have been updated and the index is now used the
             // value needs to be check as it can be the value that shall be added
             let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
             let mut group_meta_data = group_meta_data;
-            for index in iter {
-                let new_group_meta_data =
-                    group_meta_data | (1 << (64 - 8 + index)) | ((h2 as u64) << (index * 8));
-                if let Some(new_group_meta_data) =
-                    group.cas_metadata(group_meta_data, new_group_meta_data)
-                {
-                    let reference = group.get_reference(index);
-                    group_meta_data = new_group_meta_data;
-                    if let Some(result) = reference.get(hash, eq) {
-                        return result;
+            'indexLoop: for index in iter {
+                loop {
+                    match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index) {
+                        ReserveResult::Reserved => {
+                            break;
+                        }
+                        ReserveResult::AlreadyReservedWithOtherH2 => {
+                            continue 'indexLoop;
+                        }
+                        ReserveResult::Occupied => {
+                            let result = bucket.get_ref(index);
+                            if value.eq((*result).borrow()) {
+                                return *result;
+                            }
+                            continue 'indexLoop;
+                        }
                     }
-                    continue;
                 }
-                let reference = group.get_reference(index);
-                if let Some(result) = reference.intern(hash, eq, make) {
-                    return result;
+                let result = make();
+                *bucket.get_ref(index) = result;
+
+                bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index);
+                return result;
+            }
+        }
+
+        // probe_seq never returns.
+        unreachable!();
+    }
+
+    /// Searches for an element in the table.
+    #[inline]
+    pub(crate) fn get<Q>(&mut self, hash: u64, value: &Q) -> Option<T>
+    where
+        T: Sync + Send + Borrow<Q> + Copy,
+        Q: Sync + Send + Eq,
+    {
+        let h2 = h2(hash);
+        for pos in self.probe_seq(hash) {
+            let bucket = unsafe { self.bucket(pos) };
+            let group_meta_data = unsafe { bucket.meta_data.get_metadata_optimistically() };
+            let valid_bits = get_valid_bits(group_meta_data);
+            for index in match_byte(valid_bits, group_meta_data, h2) {
+                let result = bucket.get_ref(index);
+                if value.eq((*result).borrow()) {
+                    return Some(*result);
                 }
             }
+            if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
+                // not found this bucket and the bucket is full try the new bucket
+                continue;
+            }
+            return None;
         }
 
         // probe_seq never returns.
