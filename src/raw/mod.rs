@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicIsize, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::mem;
@@ -93,7 +93,6 @@ impl Iterator for ProbeSeq {
 /// Returns `None` if an overflow occurs.
 #[inline]
 fn capacity_to_buckets(cap: usize) -> Option<usize> {
-    let cap = cap / 7; // as there is 7 elemntes in each bucket
     let adjusted_cap = if cap < 8 {
         // Need at least 1 free bucket on small tables
         cap + 1
@@ -104,27 +103,33 @@ fn capacity_to_buckets(cap: usize) -> Option<usize> {
         // overflow check here.
         cap.checked_mul(8)? / 7
     };
+    // as there is 7 elemntes in each bucket
+    let adjusted_buckets =
+        if adjusted_cap % 7 == 0 { adjusted_cap / 7 } else { adjusted_cap / 7 + 1 };
 
     // Any overflows will have been caught by the checked_mul. Also, any
     // rounding errors from the division above will be cleaned up by
     // next_power_of_two (which can't overflow because of the previous divison).
-    dbg!(Some(adjusted_cap.next_power_of_two()))
+    Some(adjusted_buckets.next_power_of_two())
 }
 
-/// Returns the maximum effective capacity for the given bucket mask, taking
+/// Returns the maximum effective capacity for the given number of buckets, taking
 /// the maximum load factor into account.
 #[inline]
-fn bucket_mask_to_capacity(bucket_mask: usize) -> usize {
-    let bucket_mask = dbg!(bucket_mask) * 7;
-    if bucket_mask < 8 {
+fn buckets_to_capacity(buckets: usize) -> usize {
+    if buckets == 1 {
         // For tables with 1/2/4/8 buckets, we always reserve one empty slot.
         // Keep in mind that the bucket mask is one less than the bucket count.
-        dbg!(bucket_mask)
+        6
     } else {
         // For larger tables we reserve 12.5% of the slots as empty.
-        dbg!(((bucket_mask + 1) / 8) * 7)
+        let buckets_cap = buckets * 7;
+        (buckets_cap / 8) * 7
     }
 }
+
+#[repr(align(64))]
+struct CacheAligned<T>(T);
 
 #[repr(align(64))]
 struct Bucket<T> {
@@ -154,7 +159,7 @@ pub(crate) struct RawInterner<T> {
     buckets: NonNull<Bucket<T>>,
 
     // Number of elements that can be inserted before we need to grow the table
-    growth_left: AtomicUsize,
+    growth_left: CacheAligned<AtomicIsize>,
 }
 
 impl<T> Drop for RawInterner<T> {
@@ -181,7 +186,7 @@ impl<T> RawInterner<T> {
             // SAFTY shall not mutate this as the capacity is to smal
             buckets: NonNull::new(unsafe { STATIC_BUCKET }.as_mut_ptr() as *mut Bucket<T>).unwrap(),
             bucket_mask: 0,
-            growth_left: AtomicUsize::new(0),
+            growth_left: CacheAligned(AtomicIsize::new(0)),
         }
     }
 
@@ -198,7 +203,7 @@ impl<T> RawInterner<T> {
             buckets: NonNull::new(unsafe { alloc_zeroed(layout) } as *mut Bucket<T>)
                 .unwrap_or_else(|| handle_alloc_error(layout)),
             bucket_mask: buckets - 1,
-            growth_left: AtomicUsize::new(bucket_mask_to_capacity(buckets - 1)),
+            growth_left: CacheAligned(AtomicIsize::new(buckets_to_capacity(buckets) as isize)),
         }
     }
 
@@ -239,7 +244,7 @@ impl<T> RawInterner<T> {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             let bucket = unsafe { self.bucket(pos) };
-            let group_meta_data = unsafe { bucket.meta_data.get_metadata_optimistically() };
+            let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref(index);
@@ -247,25 +252,14 @@ impl<T> RawInterner<T> {
                     return *result;
                 }
             }
+
+            if self.growth_left.0.load(Ordering::Relaxed) <= 0 {
+                unimplemented!("resize")
+            }
+
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
                 continue;
-            }
-
-            let mut old = self.growth_left.load(Ordering::SeqCst);
-            loop {
-                if old == 1 {
-                    unimplemented!("resize")
-                }
-                match self.growth_left.compare_exchange_weak(
-                    old,
-                    old - 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(_) => break,
-                    Err(x) => old = x,
-                }
             }
 
             // the bucket was not full when the metadata was fetched but new values can have been added
@@ -291,6 +285,9 @@ impl<T> RawInterner<T> {
                         }
                     }
                 }
+
+                self.growth_left.0.fetch_sub(1, Ordering::Relaxed);
+
                 let result = make();
                 *bucket.get_ref(index) = result;
 
@@ -313,7 +310,7 @@ impl<T> RawInterner<T> {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             let bucket = unsafe { self.bucket(pos) };
-            let group_meta_data = unsafe { bucket.meta_data.get_metadata_optimistically() };
+            let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref(index);

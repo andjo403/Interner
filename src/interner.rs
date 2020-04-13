@@ -160,7 +160,7 @@ where
         Q: Sync + Send + Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Acquire) };
+        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Relaxed) };
         raw_interner.intern(hash, value, make)
     }
 
@@ -186,7 +186,7 @@ where
         Q: Sync + Send + Hash + Eq + std::fmt::Debug,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Acquire) };
+        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Relaxed) };
         raw_interner.get(hash, value)
     }
 }
@@ -204,7 +204,7 @@ where
 
 impl<T, S> Drop for Interner<T, S> {
     fn drop(&mut self) {
-        let raw_interner = self.raw_interner.load(Ordering::Acquire);
+        let raw_interner = self.raw_interner.load(Ordering::Relaxed);
         let _raw_interner = unsafe { Box::from_raw(raw_interner) };
     }
 }

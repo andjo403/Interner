@@ -88,7 +88,12 @@ impl MetaData {
                 }
                 return ReserveResult::AlreadyReservedWithOtherH2;
             }
-            match self.compare_exchange_metadata(*group_meta_data, new_group_meta_data) {
+            match self.meta_data.compare_exchange_weak(
+                *group_meta_data,
+                new_group_meta_data,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => {
                     *group_meta_data = new_group_meta_data;
                     return ReserveResult::Reserved;
@@ -162,8 +167,15 @@ impl MetaData {
             }
             let new_group_meta_data =
                 (group_meta_data & !h2_bits(0xff, index)) | valid_bit(index) | h2_bits(h2, index);
-            if let Some(new_meta_data) =
-                self.compare_exchange_metadata(group_meta_data, new_group_meta_data).err()
+            if let Some(new_meta_data) = self
+                .meta_data
+                .compare_exchange_weak(
+                    group_meta_data,
+                    new_group_meta_data,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .err()
             {
                 group_meta_data = new_meta_data;
                 continue;
@@ -186,12 +198,8 @@ impl MetaData {
     }
 
     #[inline]
-    pub unsafe fn get_metadata_optimistically(&self) -> u64 {
-        *self.meta_data.as_mut_ptr()
-    }
-    #[inline]
-    pub fn compare_exchange_metadata(&self, current: u64, new: u64) -> Result<u64, u64> {
-        self.meta_data.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+    pub unsafe fn get_metadata_relaxed(&self) -> u64 {
+        self.meta_data.load(Ordering::Relaxed)
     }
 }
 
@@ -200,7 +208,7 @@ fn reserve_reserved() {
     let meta_data = MetaData { meta_data: AtomicU64::new(0) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0xFD);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0xFD);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0xFD);
 }
@@ -210,7 +218,7 @@ fn reserve_reserved_index1() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xA8, 0)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xA8, 0);
     let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0x100_0000_0000_FDA8);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0x100_0000_0000_FDA8);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0x100_0000_0000_FDA8);
 }
@@ -220,7 +228,7 @@ fn reserve_occupied() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0x100_0000_0000_00AB);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0x100_0000_0000_00AB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
 }
@@ -234,7 +242,7 @@ fn reserve_occupied_index1() {
     };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0x300_0000_0000_AAAB);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0x300_0000_0000_AAAB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
 }
@@ -244,7 +252,7 @@ fn reserve_already_reserved_with_other_h2() {
     let meta_data = MetaData { meta_data: AtomicU64::new(h2_bits(0xAD, 0)) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0xAD);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0xAD);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0xAD);
 }
@@ -255,7 +263,7 @@ fn reserve_already_reserved_with_other_h2_index1() {
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0x100_0000_0000_ADAB);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0x100_0000_0000_ADAB);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
 }
@@ -266,5 +274,5 @@ fn set_valid() {
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
     meta_data.set_valid_and_unpark(group_meta_data, 0xA8, 1);
-    assert_eq!(unsafe { meta_data.get_metadata_optimistically() }, 0x300_0000_0000_A8AB);
+    assert_eq!(unsafe { meta_data.get_metadata_relaxed() }, 0x300_0000_0000_A8AB);
 }
