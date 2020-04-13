@@ -56,37 +56,6 @@ fn h2(hash: u64) -> u8 {
     (top8 & 0xff) as u8 // truncation
 }
 
-/// Probe sequence based on triangular numbers, which is guaranteed (since our
-/// table size is a power of two) to visit every bucket of elements exactly once.
-///
-/// A triangular probe has us jump by 1 more bucket every time. So first we
-/// jump by 1 bucket (meaning we just continue our linear scan), then 2 buckets
-/// (skipping over 1 bucket), then 3 buckets (skipping over 2 buckets), and so on.
-///
-/// Proof that the probe will visit every bucket in the table:
-/// <https://fgiesen.wordpress.com/2015/02/22/triangular-numbers-mod-2n/>
-struct ProbeSeq {
-    bucket_mask: usize,
-    pos: usize,
-    stride: usize,
-}
-
-impl Iterator for ProbeSeq {
-    type Item = usize;
-
-    #[inline]
-    fn next(&mut self) -> Option<usize> {
-        // We should have found an empty bucket by now and ended the probe.
-        debug_assert!(self.stride <= self.bucket_mask, "Went past end of probe sequence");
-
-        let result = self.pos;
-        self.stride += 1;
-        self.pos += self.stride;
-        self.pos &= self.bucket_mask;
-        Some(result)
-    }
-}
-
 /// Returns the number of buckets needed to hold the given number of items,
 /// taking the maximum load factor into account.
 ///
@@ -219,16 +188,6 @@ impl<T> RawInterner<T> {
         }
     }
 
-    /// Returns an iterator for a probe sequence on the table.
-    ///
-    /// This iterator never terminates, but is guaranteed to visit each bucket
-    /// exactly once. The loop using `probe_seq` must terminate upon
-    /// reaching a bucket that not is full.
-    #[inline]
-    fn probe_seq(&self, hash: u64) -> ProbeSeq {
-        ProbeSeq { bucket_mask: self.bucket_mask, pos: h1(hash) & self.bucket_mask, stride: 0 }
-    }
-
     unsafe fn bucket(&self, index: usize) -> &mut Bucket<T> {
         debug_assert!(index < self.bucket_mask + 1);
         &mut *self.buckets.as_ptr().add(index)
@@ -242,7 +201,9 @@ impl<T> RawInterner<T> {
         Q: Sync + Send + Eq,
     {
         let h2 = h2(hash);
-        for pos in self.probe_seq(hash) {
+        let mut stride = 0;
+        let mut pos = h1(hash) & self.bucket_mask;
+        loop {
             let bucket = unsafe { self.bucket(pos) };
             let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
             let valid_bits = get_valid_bits(group_meta_data);
@@ -259,6 +220,8 @@ impl<T> RawInterner<T> {
 
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
+                stride += 1;
+                pos = (pos + stride) & self.bucket_mask;
                 continue;
             }
 
@@ -294,10 +257,9 @@ impl<T> RawInterner<T> {
                 bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index);
                 return result;
             }
+            stride += 1;
+            pos = (pos + stride) & self.bucket_mask;
         }
-
-        // probe_seq never returns.
-        unreachable!();
     }
 
     /// Searches for an element in the table.
@@ -308,7 +270,9 @@ impl<T> RawInterner<T> {
         Q: Sync + Send + Eq,
     {
         let h2 = h2(hash);
-        for pos in self.probe_seq(hash) {
+        let mut stride = 0;
+        let mut pos = h1(hash) & self.bucket_mask;
+        loop {
             let bucket = unsafe { self.bucket(pos) };
             let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
             let valid_bits = get_valid_bits(group_meta_data);
@@ -320,12 +284,11 @@ impl<T> RawInterner<T> {
             }
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
+                stride += 1;
+                pos = (pos + stride) & self.bucket_mask;
                 continue;
             }
             return None;
         }
-
-        // probe_seq never returns.
-        unreachable!();
     }
 }
