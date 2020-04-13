@@ -16,7 +16,7 @@ fn task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
 }
 
 fn intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("intern_u64refs");
+    let mut group = c.benchmark_group("Interner/intern_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
     let values: Vec<u64> = (0..ITER).collect();
@@ -42,7 +42,7 @@ fn task_get_interned_u64refs(interner: &Interner<&'_ u64>) {
 }
 
 fn get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("get_already_interned_u64refs");
+    let mut group = c.benchmark_group("Interner/get_already_interned_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
     let values: Vec<u64> = (0..ITER).collect();
@@ -71,10 +71,10 @@ fn single_task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
 }
 
 fn single_intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("single_intern_u64refs");
+    let mut group = c.benchmark_group("Interner/single_thread_intern_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let values: Vec<u64> = (0..ITER).collect();
-    group.bench_function("single_task_intern_u64refs", |bencher| {
+    group.bench_function("1", |bencher| {
         bencher.iter(|| single_task_intern_u64refs(values.as_slice()))
     });
     group.finish();
@@ -87,11 +87,11 @@ fn single_task_get_interned_u64refs(interner: &mut Interner<&'_ u64>) {
 }
 
 fn single_get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("single_get_already_interned_u64refs");
+    let mut group = c.benchmark_group("Interner/single_thread_get_already_interned_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let values: Vec<u64> = (0..ITER).collect();
     let mut interner = task_intern_u64refs(values.as_slice());
-    group.bench_function("single_task_get_interned_u64refs", |bencher| {
+    group.bench_function("1", |bencher| {
         bencher.iter(|| single_task_get_interned_u64refs(&mut interner))
     });
     group.finish();

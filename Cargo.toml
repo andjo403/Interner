@@ -17,6 +17,8 @@ fxhash = "0.2.1"
 rayon = "1.3"
 criterion = "0.3"
 num_cpus = "1.12.0"
+smallvec = { version = "1.0", features = ["union", "may_dangle"] }
+parking_lot = {version = "0.10", features = ["nightly"]}
 
 [[bench]]
 name = "interner_bench"
@@ -24,4 +26,8 @@ harness = false
 
 [[bench]]
 name = "std_hashmap_bench"
+harness = false
+
+[[bench]]
+name = "sharded_hashmap_bench"
 harness = false
