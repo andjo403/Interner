@@ -36,7 +36,19 @@ where
 
 const ITER: u64 = 32 * 1024;
 
-fn task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
+fn task_create_and_drop() {
+    let value1 = 42;
+    let mut interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    intern_ref(&mut interner, &value1, || &value1);
+}
+
+fn create_and_drop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_drop");
+    group.bench_function("1", |bencher| bencher.iter(|| task_create_and_drop()));
+    group.finish();
+}
+
+fn task_create_and_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
     let mut map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
     (0..ITER).for_each(|i: u64| {
         intern_ref(&mut map, &i, || values.get(i as usize).unwrap());
@@ -44,11 +56,13 @@ fn task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
     map
 }
 
-fn intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashmap/single_thread_intern_u64refs");
+fn create_and_intern_u64refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let values: Vec<u64> = (0..ITER).collect();
-    group.bench_function("1", |bencher| bencher.iter(|| task_intern_u64refs(values.as_slice())));
+    group.bench_function("1", |bencher| {
+        bencher.iter(|| task_create_and_intern_u64refs(values.as_slice()))
+    });
     group.finish();
 }
 
@@ -62,10 +76,10 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u64refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let values: Vec<u64> = (0..ITER).collect();
-    let mut interner = task_intern_u64refs(values.as_slice());
+    let mut interner = task_create_and_intern_u64refs(values.as_slice());
     group.bench_function("1", |bencher| bencher.iter(|| task_get_interned_u64refs(&mut interner)));
     group.finish();
 }
 
-criterion_group!(benches, intern_u64refs, get_already_interned_u64refs);
+criterion_group!(benches, create_and_drop, get_already_interned_u64refs, create_and_intern_u64refs);
 criterion_main!(benches);
