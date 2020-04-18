@@ -188,9 +188,9 @@ impl<T> RawInterner<T> {
         }
     }
 
-    unsafe fn bucket(&self, index: usize) -> &mut Bucket<T> {
-        debug_assert!(index < self.bucket_mask + 1);
-        &mut *self.buckets.as_ptr().add(index)
+    fn bucket(&self, index: usize) -> &mut Bucket<T> {
+        // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
+        unsafe { &mut *self.buckets.as_ptr().add(index & self.bucket_mask) }
     }
 
     /// Searches for an element in the table.
@@ -202,10 +202,10 @@ impl<T> RawInterner<T> {
     {
         let h2 = h2(hash);
         let mut stride = 0;
-        let mut pos = h1(hash) & self.bucket_mask;
+        let mut pos = h1(hash);
         loop {
-            let bucket = unsafe { self.bucket(pos) };
-            let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
+            let bucket = self.bucket(pos);
+            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref(index);
@@ -221,7 +221,7 @@ impl<T> RawInterner<T> {
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
                 stride += 1;
-                pos = (pos + stride) & self.bucket_mask;
+                pos = pos + stride;
                 continue;
             }
 
@@ -258,7 +258,7 @@ impl<T> RawInterner<T> {
                 return result;
             }
             stride += 1;
-            pos = (pos + stride) & self.bucket_mask;
+            pos = pos + stride;
         }
     }
 
@@ -271,10 +271,10 @@ impl<T> RawInterner<T> {
     {
         let h2 = h2(hash);
         let mut stride = 0;
-        let mut pos = h1(hash) & self.bucket_mask;
+        let mut pos = h1(hash);
         loop {
-            let bucket = unsafe { self.bucket(pos) };
-            let group_meta_data = unsafe { bucket.meta_data.get_metadata_relaxed() };
+            let bucket = self.bucket(pos);
+            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref(index);
@@ -285,7 +285,7 @@ impl<T> RawInterner<T> {
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
                 stride += 1;
-                pos = (pos + stride) & self.bucket_mask;
+                pos = pos + stride;
                 continue;
             }
             return None;
