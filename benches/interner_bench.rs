@@ -15,19 +15,7 @@ fn task_create_and_drop() {
 
 fn create_and_drop(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/create_and_drop");
-    let max = num_cpus::get();
-
-    for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |bencher, &threads| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-                pool.install(|| bencher.iter(|| task_create_and_drop()));
-            },
-        );
-    }
-
+    group.bench_function("1", |bencher| bencher.iter(|| task_create_and_drop()));
     group.finish();
 }
 
