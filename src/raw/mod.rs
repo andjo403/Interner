@@ -188,11 +188,6 @@ impl<T> RawInterner<T> {
         }
     }
 
-    fn bucket(&self, index: usize) -> &mut Bucket<T> {
-        // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
-        unsafe { &mut *self.buckets.as_ptr().add(index & self.bucket_mask) }
-    }
-
     /// Searches for an element in the table.
     #[inline]
     pub(crate) fn intern<Q>(&mut self, hash: u64, value: &Q, make: impl FnOnce() -> T) -> T
@@ -204,7 +199,8 @@ impl<T> RawInterner<T> {
         let mut stride = 0;
         let mut pos = h1(hash);
         loop {
-            let bucket = self.bucket(pos);
+            // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos & self.bucket_mask) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
@@ -221,7 +217,7 @@ impl<T> RawInterner<T> {
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
                 stride += 1;
-                pos = pos + stride;
+                pos += stride;
                 continue;
             }
 
@@ -230,22 +226,18 @@ impl<T> RawInterner<T> {
             // value needs to be check as it can be the value that shall be added
             let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
             let mut group_meta_data = group_meta_data;
-            'indexLoop: for index in iter {
-                loop {
-                    match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index) {
-                        ReserveResult::Reserved => {
-                            break;
+            for index in iter {
+                match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index) {
+                    ReserveResult::Reserved => {}
+                    ReserveResult::AlreadyReservedWithOtherH2 => {
+                        continue;
+                    }
+                    ReserveResult::Occupied => {
+                        let result = bucket.get_ref(index);
+                        if value.eq((*result).borrow()) {
+                            return *result;
                         }
-                        ReserveResult::AlreadyReservedWithOtherH2 => {
-                            continue 'indexLoop;
-                        }
-                        ReserveResult::Occupied => {
-                            let result = bucket.get_ref(index);
-                            if value.eq((*result).borrow()) {
-                                return *result;
-                            }
-                            continue 'indexLoop;
-                        }
+                        continue;
                     }
                 }
 
@@ -258,7 +250,7 @@ impl<T> RawInterner<T> {
                 return result;
             }
             stride += 1;
-            pos = pos + stride;
+            pos += stride;
         }
     }
 
@@ -273,7 +265,8 @@ impl<T> RawInterner<T> {
         let mut stride = 0;
         let mut pos = h1(hash);
         loop {
-            let bucket = self.bucket(pos);
+            // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos & self.bucket_mask) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
@@ -285,7 +278,7 @@ impl<T> RawInterner<T> {
             if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
                 // not found this bucket and the bucket is full try the new bucket
                 stride += 1;
-                pos = pos + stride;
+                pos += stride;
                 continue;
             }
             return None;
