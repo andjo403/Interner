@@ -5,6 +5,7 @@ use std::borrow::Borrow;
 use std::collections::hash_map::RawEntryMut;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
 type Interner<V> = HashMap<V, (), FxBuildHasher>;
 
@@ -81,5 +82,61 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, create_and_drop, get_already_interned_u64refs, create_and_intern_u64refs);
+fn mutex_task_create_and_drop() {
+    let value1 = 42;
+    let interner =
+        Mutex::new(Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default()));
+    intern_ref(&mut interner.lock().unwrap(), &value1, || &value1);
+}
+
+fn mutex_create_and_drop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_drop_lock");
+    group.bench_function("1", |bencher| bencher.iter(|| mutex_task_create_and_drop()));
+    group.finish();
+}
+
+fn mutex_task_create_and_intern_u64refs(values: &[u64]) {
+    let map =
+        Mutex::new(Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default()));
+    (0..ITER).for_each(|i: u64| {
+        intern_ref(&mut map.lock().unwrap(), &i, || values.get(i as usize).unwrap());
+    });
+}
+
+fn mutex_create_and_intern_u64refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u64refs_lock");
+    group.throughput(Throughput::Elements(ITER as u64));
+    let values: Vec<u64> = (0..ITER).collect();
+    group.bench_function("1", |bencher| {
+        bencher.iter(|| mutex_task_create_and_intern_u64refs(values.as_slice()))
+    });
+    group.finish();
+}
+
+fn mutex_task_get_interned_u64refs(interner: &mut Mutex<Interner<&'_ u64>>) {
+    (0..ITER).for_each(|i: u64| {
+        intern_ref(&mut interner.lock().unwrap(), &i, || unimplemented!());
+    });
+}
+
+fn mutex_get_already_interned_u64refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u64refs_lock");
+    group.throughput(Throughput::Elements(ITER as u64));
+    let values: Vec<u64> = (0..ITER).collect();
+    let mut interner = Mutex::new(task_create_and_intern_u64refs(values.as_slice()));
+    group.bench_function("1", |bencher| {
+        bencher.iter(|| mutex_task_get_interned_u64refs(&mut interner))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    create_and_drop,
+    get_already_interned_u64refs,
+    create_and_intern_u64refs,
+    mutex_create_and_drop,
+    mutex_get_already_interned_u64refs,
+    mutex_create_and_intern_u64refs
+);
 criterion_main!(benches);
