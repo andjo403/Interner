@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
+use std::sync::Mutex;
 
 /// Default hasher for `HashMap`.
 pub type DefaultHashBuilder = RandomState;
@@ -18,10 +19,14 @@ pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: 
 pub struct Interner<T, S = DefaultHashBuilder> {
     hash_builder: S,
     raw_interner: AtomicPtr<RawInterner<T>>,
+    resize_lock: Mutex<()>,
     phantom: PhantomData<T>,
 }
 
-impl<T> Interner<T, DefaultHashBuilder> {
+impl<T> Interner<T, DefaultHashBuilder>
+where
+    T: Sync + Send + Copy,
+{
     /// Creates an empty `Interner`.
     ///
     /// The Interner is initially created with a capacity of 0, so it will not allocate until it
@@ -55,7 +60,10 @@ impl<T> Interner<T, DefaultHashBuilder> {
     }
 }
 
-impl<T, S> Interner<T, S> {
+impl<T, S> Interner<T, S>
+where
+    T: Sync + Send + Copy,
+{
     /// Creates an empty `Interner` which will use the given hash builder to hash
     /// keys.
     ///
@@ -80,7 +88,7 @@ impl<T, S> Interner<T, S> {
         let raw_interner = Box::new(RawInterner::new());
         let raw_interner = Box::into_raw(raw_interner);
         let raw_interner = AtomicPtr::new(raw_interner);
-        Self { hash_builder, raw_interner, phantom: PhantomData }
+        Self { hash_builder, raw_interner, resize_lock: Mutex::new(()), phantom: PhantomData }
     }
 
     /// Creates an empty `HashMap` with the specified capacity, using `hash_builder`
@@ -108,7 +116,7 @@ impl<T, S> Interner<T, S> {
         let raw_interner = Box::new(RawInterner::with_capacity(capacity));
         let raw_interner = Box::into_raw(raw_interner);
         let raw_interner = AtomicPtr::new(raw_interner);
-        Self { hash_builder, raw_interner, phantom: PhantomData }
+        Self { hash_builder, raw_interner, resize_lock: Mutex::new(()), phantom: PhantomData }
     }
 
     /// Returns a reference to the map's [`BuildHasher`].
@@ -154,46 +162,32 @@ where
     /// assert_eq!(&value2,result);
     /// ```
     #[inline]
-    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl FnOnce() -> T) -> T
+    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl FnOnce() -> T + Copy) -> T
     where
         T: Sync + Send + Borrow<Q> + Copy,
         Q: Sync + Send + Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Relaxed) };
-        raw_interner.intern(hash, value, make)
-    }
-
-    /// Get reference to the interned value.
-    /// will panic if the value is not pressent
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use interner::Interner;
-    ///
-    /// let value1 :i32 = 42;
-    /// let interner: Interner<&i32> = Interner::with_capacity(2);
-    /// let result = interner.intern_ref(&value1,|| {&value1});
-    /// assert_eq!(&value1,result);
-    /// let result = interner.get(&value1);
-    /// assert_eq!(&value1,result.unwrap());
-    /// ```
-    #[inline]
-    pub fn get<Q: Sized>(&self, value: &Q) -> Option<T>
-    where
-        T: Sync + Send + Borrow<Q> + Copy,
-        Q: Sync + Send + Hash + Eq + std::fmt::Debug,
-    {
-        let hash = make_hash(&self.hash_builder, value);
-        let raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Relaxed) };
-        raw_interner.get(hash, value)
+        let mut raw_interner = unsafe { &mut *self.raw_interner.load(Ordering::Relaxed) };
+        loop {
+            if let Some(result) = raw_interner.intern(hash, value, make) {
+                return result;
+            }
+            if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
+                raw_interner = new_raw_interner;
+            } else {
+                let _ = self.resize_lock.lock();
+                raw_interner =
+                    raw_interner.set_next_raw_interner(|x| make_hash(&self.hash_builder, x));
+            }
+        }
     }
 }
 
 impl<T, S> Default for Interner<T, S>
 where
     S: Default,
+    T: Sync + Send + Copy,
 {
     /// Creates an empty `Interner<T, S>`, with the `Default` value for the hasher.
     #[inline]
@@ -312,7 +306,56 @@ fn intern_ref3() {
     });
 
     (1..ITER).into_iter().for_each(|i: u64| {
-        let result = interner.get(&i);
-        assert_eq!(i, *result.unwrap());
+        let result = interner.intern_ref(&i, || unimplemented!());
+        assert_eq!(i, *result);
+    });
+}
+
+#[test]
+fn single_threaded_resize() {
+    use fxhash::FxBuildHasher;
+    const ITER: u64 = 1024;
+    let values: Vec<u64> = (0..ITER).collect();
+    let values = values.into_boxed_slice();
+
+    let hashbuilder = FxBuildHasher::default();
+    let interner = Interner::with_hasher(hashbuilder.clone());
+    (1..ITER).into_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || values.get(i as usize).unwrap());
+        interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+    });
+
+    (1..ITER).into_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+    });
+}
+
+#[test]
+fn multi_thread_resize_works() {
+    use fxhash::FxBuildHasher;
+    use rayon::prelude::*;
+    use std::sync::Arc;
+    const ITER: u64 = 128;
+    let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
+    let hashbuilder = FxBuildHasher::default();
+
+    let interner: Interner<&u64, FxBuildHasher> = Interner::with_hasher(hashbuilder.clone());
+    (1..ITER).into_par_iter().for_each(|i: u64| {
+        interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
+        let result = interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+        assert_eq!(i, *result);
+    });
+
+    (1..ITER).into_iter().for_each(|i: u64| {
+        let result = interner.intern_ref(&i, || {
+            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+        });
+        assert_eq!(i, *result);
     });
 }

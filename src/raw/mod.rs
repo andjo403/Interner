@@ -1,7 +1,8 @@
-use core::sync::atomic::{AtomicIsize, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::mem;
+use std::ptr;
 use std::ptr::NonNull;
 
 cfg_if::cfg_if! {
@@ -32,9 +33,39 @@ use bitmask::BitMaskIter;
 mod meta_data;
 
 use self::imp::match_byte;
-use meta_data::{MetaData, ReserveResult};
+use meta_data::{bucket_full, bucket_moved, get_valid_bits, MetaData, ReserveResult};
 
-const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
+/// Probe sequence based on triangular numbers, which is guaranteed (since our
+/// table size is a power of two) to visit every group of elements exactly once.
+///
+/// A triangular probe has us jump by 1 more group every time. So first we
+/// jump by 1 group (meaning we just continue our linear scan), then 2 groups
+/// (skipping over 1 group), then 3 groups (skipping over 2 groups), and so on.
+///
+/// Proof that the probe will visit every group in the table:
+/// <https://fgiesen.wordpress.com/2015/02/22/triangular-numbers-mod-2n/>
+struct ProbeSeq {
+    bucket_mask: usize,
+    pos: usize,
+    stride: usize,
+    resize_limit: usize,
+}
+
+impl Iterator for ProbeSeq {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.stride >= self.resize_limit {
+            return None;
+        }
+        let result = self.pos;
+        self.stride += 1;
+        self.pos += self.stride;
+        self.pos &= self.bucket_mask;
+        Some(result)
+    }
+}
 
 /// Primary hash function, used to select the initial bucket to probe from.
 #[inline]
@@ -82,23 +113,11 @@ fn capacity_to_buckets(cap: usize) -> Option<usize> {
     Some(adjusted_buckets.next_power_of_two())
 }
 
-/// Returns the maximum effective capacity for the given number of buckets, taking
-/// the maximum load factor into account.
+/// Returns the maximum number of buckets to check before a resize is triggered.
 #[inline]
-fn buckets_to_capacity(buckets: usize) -> usize {
-    if buckets == 1 {
-        // For tables with 1/2/4/8 buckets, we always reserve one empty slot.
-        // Keep in mind that the bucket mask is one less than the bucket count.
-        6
-    } else {
-        // For larger tables we reserve 12.5% of the slots as empty.
-        let buckets_cap = buckets * 7;
-        (buckets_cap / 8) * 7
-    }
+fn buckets_to_resize_limit(buckets: usize) -> usize {
+    if buckets <= 64 { 1 } else { 4 }
 }
-
-#[repr(align(64))]
-struct CacheAligned<T>(T);
 
 #[repr(align(64))]
 struct Bucket<T> {
@@ -113,11 +132,6 @@ impl<T> Bucket<T> {
     }
 }
 
-#[inline]
-fn get_valid_bits(group_meta_data: u64) -> u64 {
-    (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)
-}
-
 /// A raw hash table with an unsafe API.
 pub(crate) struct RawInterner<T> {
     // Mask to get an index from a hash value. The value is one less than the
@@ -127,8 +141,10 @@ pub(crate) struct RawInterner<T> {
     // Pointer to the array of control bytes
     buckets: NonNull<Bucket<T>>,
 
-    // Number of elements that can be inserted before we need to grow the table
-    growth_left: CacheAligned<AtomicIsize>,
+    // Number of buckets that is checked before the table is resized
+    resize_limit: usize,
+
+    next_raw_interner: AtomicPtr<RawInterner<T>>,
 }
 
 impl<T> Drop for RawInterner<T> {
@@ -142,7 +158,10 @@ impl<T> Drop for RawInterner<T> {
     }
 }
 
-impl<T> RawInterner<T> {
+impl<T> RawInterner<T>
+where
+    T: Sync + Send + Copy,
+{
     /// Creates a new empty hash table without allocating any memory.
     ///
     /// In effect this returns a table with exactly 1 bucket. However we can
@@ -155,7 +174,8 @@ impl<T> RawInterner<T> {
             // SAFTY shall not mutate this as the capacity is to smal
             buckets: NonNull::new(unsafe { STATIC_BUCKET }.as_mut_ptr() as *mut Bucket<T>).unwrap(),
             bucket_mask: 0,
-            growth_left: CacheAligned(AtomicIsize::new(0)),
+            resize_limit: 0,
+            next_raw_interner: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -172,7 +192,8 @@ impl<T> RawInterner<T> {
             buckets: NonNull::new(unsafe { alloc_zeroed(layout) } as *mut Bucket<T>)
                 .unwrap_or_else(|| handle_alloc_error(layout)),
             bucket_mask: buckets - 1,
-            growth_left: CacheAligned(AtomicIsize::new(buckets_to_capacity(buckets) as isize)),
+            resize_limit: buckets_to_resize_limit(buckets),
+            next_raw_interner: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -188,37 +209,63 @@ impl<T> RawInterner<T> {
         }
     }
 
+    /// Returns an iterator for a probe sequence on the table.
+    #[cfg_attr(feature = "inline-more", inline)]
+    fn probe_seq(&self, hash: u64) -> ProbeSeq {
+        ProbeSeq {
+            bucket_mask: self.bucket_mask,
+            pos: h1(hash) & self.bucket_mask,
+            stride: 0,
+            resize_limit: self.resize_limit,
+        }
+    }
+
+    pub(crate) fn get_next_raw_interner(&self) -> Option<&mut Self> {
+        let next = self.next_raw_interner.load(Ordering::Relaxed);
+        if next.is_null() { None } else { Some(unsafe { &mut *next }) }
+    }
+
+    pub(crate) fn set_next_raw_interner(&self, hasher: impl Fn(&T) -> u64) -> &mut Self {
+        let next = self.next_raw_interner.load(Ordering::Relaxed);
+        if next.is_null() {
+            let new_number_of_buckets = (self.bucket_mask + 1) * 2;
+            let boxed_new_raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
+            let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
+            self.next_raw_interner.store(new_raw_interner, Ordering::Relaxed);
+            let new_raw_interner = unsafe { &mut *new_raw_interner };
+            self.transfer(new_raw_interner, hasher);
+            new_raw_interner
+        } else {
+            unsafe { &mut *next }
+        }
+    }
+
     /// Searches for an element in the table.
     #[inline]
-    pub(crate) fn intern<Q>(&mut self, hash: u64, value: &Q, make: impl FnOnce() -> T) -> T
+    pub(crate) fn intern<Q>(&mut self, hash: u64, value: &Q, make: impl FnOnce() -> T) -> Option<T>
     where
-        T: Sync + Send + Borrow<Q> + Copy,
+        T: Borrow<Q>,
         Q: Sync + Send + Eq,
     {
         let h2 = h2(hash);
-        let mut stride = 0;
-        let mut pos = h1(hash);
-        loop {
+        for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
-            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos & self.bucket_mask) };
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref(index);
                 if (*value).eq((*result).borrow()) {
-                    return *result;
+                    return Some(*result);
                 }
             }
 
-            if self.growth_left.0.load(Ordering::Relaxed) <= 0 {
-                unimplemented!("resize")
-            }
-
-            if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
-                // not found this bucket and the bucket is full try the new bucket
-                stride += 1;
-                pos += stride;
+            if bucket_full(group_meta_data) {
+                // not found in this bucket and the bucket is full try the next bucket
                 continue;
+            }
+            if bucket_moved(group_meta_data) {
+                return None;
             }
 
             // the bucket was not full when the metadata was fetched but new values can have been added
@@ -235,53 +282,81 @@ impl<T> RawInterner<T> {
                     ReserveResult::Occupied => {
                         let result = bucket.get_ref(index);
                         if value.eq((*result).borrow()) {
-                            return *result;
+                            return Some(*result);
                         }
                         continue;
                     }
+                    ReserveResult::Moved => return None,
                 }
-
-                self.growth_left.0.fetch_sub(1, Ordering::Relaxed);
 
                 let result = make();
                 *bucket.get_ref(index) = result;
 
-                bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index);
-                return result;
+                if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index) {
+                    self.get_next_raw_interner().unwrap().transfer_value(hash, result);
+                }
+                return Some(result);
             }
-            stride += 1;
-            pos += stride;
+        }
+        None
+    }
+
+    fn transfer(&self, new_raw_interner: &mut Self, hasher: impl Fn(&T) -> u64) {
+        for pos in 0..self.bucket_mask + 1 {
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
+            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
+            if bucket.meta_data.mark_as_moved(group_meta_data).is_none() {
+                continue; //already moved
+            }
+            let valid_bits = get_valid_bits(group_meta_data);
+            let iter = BitMaskIter::new(valid_bits, 1);
+            for index in iter {
+                let value = bucket.get_ref(index);
+                new_raw_interner.transfer_value(hasher(value), *value);
+            }
         }
     }
 
-    /// Searches for an element in the table.
-    #[inline]
-    pub(crate) fn get<Q>(&mut self, hash: u64, value: &Q) -> Option<T>
-    where
-        T: Sync + Send + Borrow<Q> + Copy,
-        Q: Sync + Send + Eq,
-    {
+    // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
+    // this function is used for resize and the value is then in the previous instance of 'RawInterner'.
+    pub(crate) fn transfer_value(&mut self, hash: u64, value: T) -> Option<T> {
         let h2 = h2(hash);
-        let mut stride = 0;
-        let mut pos = h1(hash);
-        loop {
+        for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
-            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos & self.bucket_mask) };
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
-            for index in match_byte(valid_bits, group_meta_data, h2) {
-                let result = bucket.get_ref(index);
-                if value.eq((*result).borrow()) {
-                    return Some(*result);
-                }
-            }
-            if group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK {
-                // not found this bucket and the bucket is full try the new bucket
-                stride += 1;
-                pos += stride;
+
+            if bucket_full(group_meta_data) {
+                // this bucket is full try the next bucket
                 continue;
             }
-            return None;
+            if bucket_moved(group_meta_data) {
+                return None;
+            }
+
+            // the bucket was not full when the metadata was fetched but new values can have been added
+            // during the search but even if the metadata have been updated and the index is now used the
+            // value needs to be check as it can be the value that shall be added
+            let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
+            let mut group_meta_data = group_meta_data;
+            for index in iter {
+                match bucket.meta_data.only_reserve(&mut group_meta_data, index) {
+                    ReserveResult::Reserved => {}
+                    ReserveResult::AlreadyReservedWithOtherH2 | ReserveResult::Occupied => {
+                        continue;
+                    }
+                    ReserveResult::Moved => return None,
+                }
+
+                *bucket.get_ref(index) = value;
+
+                if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index) {
+                    self.get_next_raw_interner().unwrap().transfer_value(hash, value);
+                }
+                return Some(value);
+            }
         }
+        None
     }
 }
