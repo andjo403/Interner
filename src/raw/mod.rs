@@ -33,7 +33,9 @@ use bitmask::BitMaskIter;
 mod meta_data;
 
 use self::imp::match_byte;
-use meta_data::{bucket_full, bucket_moved, get_valid_bits, MetaData, ReserveResult};
+use meta_data::{
+    bucket_full, bucket_moved, get_valid_bits, MetaData, ReserveResult, GROUP_MOVED_BIT_MASK,
+};
 
 /// Probe sequence based on triangular numbers, which is guaranteed (since our
 /// table size is a power of two) to visit every group of elements exactly once.
@@ -130,6 +132,26 @@ impl<T> Bucket<T> {
     fn get_ref(&mut self, index: usize) -> &mut T {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
+
+    fn transfer_bucket(
+        &mut self,
+        group_meta_data: u64,
+        new_raw_interner: &mut RawInterner<T>,
+        hasher: impl Fn(&T) -> u64,
+    ) where
+        T: Sync + Send + Copy,
+    {
+        if self.meta_data.mark_as_moved(group_meta_data).is_none() {
+            return; //already moved
+        }
+        let valid_bits = get_valid_bits(group_meta_data);
+        let iter = BitMaskIter::new(valid_bits, 1);
+        for index in iter {
+            let value = self.get_ref(index);
+            let hash = hasher(value);
+            new_raw_interner.transfer_value(hash, *value);
+        }
+    }
 }
 
 /// A raw hash table with an unsafe API.
@@ -169,7 +191,7 @@ where
     /// due to our load factor forcing us to always have at least 1 free bucket.
     #[inline]
     pub fn new() -> Self {
-        static mut STATIC_BUCKET: [u64; 8] = [0; 8];
+        static mut STATIC_BUCKET: [u64; 8] = [GROUP_MOVED_BIT_MASK; 8];
         Self {
             // SAFTY shall not mutate this as the capacity is to smal
             buckets: NonNull::new(unsafe { STATIC_BUCKET }.as_mut_ptr() as *mut Bucket<T>).unwrap(),
@@ -221,23 +243,22 @@ where
     }
 
     pub(crate) fn get_next_raw_interner(&self) -> Option<&mut Self> {
-        let next = self.next_raw_interner.load(Ordering::Relaxed);
+        let next = self.next_raw_interner.load(Ordering::Acquire);
         if next.is_null() { None } else { Some(unsafe { &mut *next }) }
     }
 
-    pub(crate) fn set_next_raw_interner(&self, hasher: impl Fn(&T) -> u64) -> &mut Self {
-        let next = self.next_raw_interner.load(Ordering::Relaxed);
-        if next.is_null() {
-            let new_number_of_buckets = (self.bucket_mask + 1) * 2;
-            let boxed_new_raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
-            let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
-            self.next_raw_interner.store(new_raw_interner, Ordering::Relaxed);
-            let new_raw_interner = unsafe { &mut *new_raw_interner };
-            self.transfer(new_raw_interner, hasher);
-            new_raw_interner
-        } else {
-            unsafe { &mut *next }
+    pub(crate) fn resize(&self, hasher: impl Fn(&T) -> u64) -> &mut Self {
+        let new_number_of_buckets = (self.bucket_mask + 1) * 2;
+        let boxed_new_raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
+        let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
+        self.next_raw_interner.store(new_raw_interner, Ordering::Release);
+        let new_raw_interner = unsafe { &mut *new_raw_interner };
+        for pos in 0..self.bucket_mask + 1 {
+            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
+            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
+            bucket.transfer_bucket(group_meta_data, new_raw_interner, &hasher);
         }
+        new_raw_interner
     }
 
     /// Searches for an element in the table.
@@ -264,9 +285,6 @@ where
                 // not found in this bucket and the bucket is full try the next bucket
                 continue;
             }
-            if bucket_moved(group_meta_data) {
-                return None;
-            }
 
             // the bucket was not full when the metadata was fetched but new values can have been added
             // during the search but even if the metadata have been updated and the index is now used the
@@ -276,7 +294,7 @@ where
             for index in iter {
                 match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index) {
                     ReserveResult::Reserved => {}
-                    ReserveResult::AlreadyReservedWithOtherH2 => {
+                    ReserveResult::AlreadyReservedWithOtherH2 | ReserveResult::Moved => {
                         continue;
                     }
                     ReserveResult::Occupied => {
@@ -286,9 +304,7 @@ where
                         }
                         continue;
                     }
-                    ReserveResult::Moved => return None,
                 }
-
                 let result = make();
                 *bucket.get_ref(index) = result;
 
@@ -297,24 +313,11 @@ where
                 }
                 return Some(result);
             }
+            if bucket_moved(group_meta_data) {
+                return None;
+            }
         }
         None
-    }
-
-    fn transfer(&self, new_raw_interner: &mut Self, hasher: impl Fn(&T) -> u64) {
-        for pos in 0..self.bucket_mask + 1 {
-            let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
-            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
-            if bucket.meta_data.mark_as_moved(group_meta_data).is_none() {
-                continue; //already moved
-            }
-            let valid_bits = get_valid_bits(group_meta_data);
-            let iter = BitMaskIter::new(valid_bits, 1);
-            for index in iter {
-                let value = bucket.get_ref(index);
-                new_raw_interner.transfer_value(hasher(value), *value);
-            }
-        }
     }
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
@@ -331,9 +334,6 @@ where
                 // this bucket is full try the next bucket
                 continue;
             }
-            if bucket_moved(group_meta_data) {
-                return None;
-            }
 
             // the bucket was not full when the metadata was fetched but new values can have been added
             // during the search but even if the metadata have been updated and the index is now used the
@@ -343,10 +343,11 @@ where
             for index in iter {
                 match bucket.meta_data.only_reserve(&mut group_meta_data, index) {
                     ReserveResult::Reserved => {}
-                    ReserveResult::AlreadyReservedWithOtherH2 | ReserveResult::Occupied => {
+                    ReserveResult::AlreadyReservedWithOtherH2
+                    | ReserveResult::Occupied
+                    | ReserveResult::Moved => {
                         continue;
                     }
-                    ReserveResult::Moved => return None,
                 }
 
                 *bucket.get_ref(index) = value;

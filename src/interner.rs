@@ -176,9 +176,13 @@ where
             if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
                 raw_interner = new_raw_interner;
             } else {
-                let _ = self.resize_lock.lock();
-                raw_interner =
-                    raw_interner.set_next_raw_interner(|x| make_hash(&self.hash_builder, x));
+                let _guard = self.resize_lock.lock();
+                if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
+                    raw_interner = new_raw_interner;
+                } else {
+                    raw_interner = raw_interner.resize(|x| make_hash(&self.hash_builder, x));
+                    //self.raw_interner.store(raw_interner, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -339,7 +343,7 @@ fn multi_thread_resize_works() {
     use fxhash::FxBuildHasher;
     use rayon::prelude::*;
     use std::sync::Arc;
-    const ITER: u64 = 128;
+    const ITER: u64 = 32 * 1024;
     let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
     let hashbuilder = FxBuildHasher::default();
 
@@ -347,14 +351,14 @@ fn multi_thread_resize_works() {
     (1..ITER).into_par_iter().for_each(|i: u64| {
         interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
         let result = interner.intern_ref(&i, || {
-            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+            unimplemented!("value: {}, Hash {}", i, make_hash(&hashbuilder, &i))
         });
         assert_eq!(i, *result);
     });
 
     (1..ITER).into_iter().for_each(|i: u64| {
         let result = interner.intern_ref(&i, || {
-            unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
+            unimplemented!("value: {}, Hash {}", i, make_hash(&hashbuilder, &i))
         });
         assert_eq!(i, *result);
     });

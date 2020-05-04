@@ -8,7 +8,7 @@ const TOKEN_VALUE_SET: UnparkToken = UnparkToken(0);
 const LOCKED_BIT: u64 = 0b1;
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
-const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
+pub const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
 /// This bit is set instead of h2 if valid bit is not set just before parking a thread.
 /// A thread is being parked if it wants to lock the mutex, but it is currently being held by some other thread.
 //const PARKED_BIT: u64 = 0b10;
@@ -94,9 +94,6 @@ impl MetaData {
         index: usize,
     ) -> ReserveResult {
         loop {
-            if bucket_moved(*group_meta_data) {
-                return ReserveResult::Moved;
-            }
             let new_group_meta_data = *group_meta_data | h2_bits(h2 & 0xFC | LOCKED_BIT, index);
             if valid_bit_set(*group_meta_data, index) {
                 return ReserveResult::Occupied;
@@ -107,6 +104,9 @@ impl MetaData {
                     return self.wait_on_lock_release(group_meta_data, index);
                 }
                 return ReserveResult::AlreadyReservedWithOtherH2;
+            }
+            if bucket_moved(*group_meta_data) {
+                return ReserveResult::Moved;
             }
             match self.meta_data.compare_exchange_weak(
                 *group_meta_data,
@@ -129,15 +129,15 @@ impl MetaData {
     #[inline]
     pub(crate) fn only_reserve(&self, group_meta_data: &mut u64, index: usize) -> ReserveResult {
         loop {
-            if bucket_moved(*group_meta_data) {
-                return ReserveResult::Moved;
-            }
             let new_group_meta_data = *group_meta_data | h2_bits(LOCKED_BIT, index);
             if valid_bit_set(*group_meta_data, index) {
                 return ReserveResult::Occupied;
             }
             if lock_bit_set(*group_meta_data, index) {
                 return ReserveResult::Occupied;
+            }
+            if bucket_moved(*group_meta_data) {
+                return ReserveResult::Moved;
             }
             match self.meta_data.compare_exchange_weak(
                 *group_meta_data,
