@@ -135,13 +135,13 @@ impl<T> Bucket<T> {
 
     fn transfer_bucket(
         &mut self,
-        group_meta_data: u64,
+        mut group_meta_data: u64,
         new_raw_interner: &mut RawInterner<T>,
         hasher: impl Fn(&T) -> u64,
     ) where
         T: Sync + Send + Copy,
     {
-        if self.meta_data.mark_as_moved(group_meta_data).is_none() {
+        if self.meta_data.mark_as_moved(&mut group_meta_data).is_none() {
             return; //already moved
         }
         let valid_bits = get_valid_bits(group_meta_data);

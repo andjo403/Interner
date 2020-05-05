@@ -262,27 +262,13 @@ impl MetaData {
         self.meta_data.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn mark_as_moved(&self, mut group_meta_data: u64) -> Option<()> {
-        loop {
-            if bucket_moved(group_meta_data) {
-                return None;
-            }
-            let new_group_meta_data = group_meta_data | GROUP_MOVED_BIT_MASK;
-            if let Some(new_meta_data) = self
-                .meta_data
-                .compare_exchange_weak(
-                    group_meta_data,
-                    new_group_meta_data,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                )
-                .err()
-            {
-                group_meta_data = new_meta_data;
-                continue;
-            }
-            return Some(());
+    pub(crate) fn mark_as_moved(&self, group_meta_data: &mut u64) -> Option<()> {
+        let old_group_meta_data = self.meta_data.fetch_or(GROUP_MOVED_BIT_MASK, Ordering::Release);
+        *group_meta_data = old_group_meta_data | GROUP_MOVED_BIT_MASK;
+        if bucket_moved(old_group_meta_data) {
+            return None;
         }
+        return Some(());
     }
 }
 
