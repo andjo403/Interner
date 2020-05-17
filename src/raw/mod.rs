@@ -1,38 +1,16 @@
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::mem;
 use std::ptr;
 use std::ptr::NonNull;
 
-cfg_if::cfg_if! {
-    // Use the SSE2 implementation if possible: it allows us to scan 16 buckets
-    // at once instead of 8. We don't bother with AVX since it would require
-    // runtime dispatch and wouldn't gain us much anyways: the probability of
-    // finding a match drops off drastically after the first few buckets.
-    //
-    // I attempted an implementation on ARM using NEON instructions, but it
-    // turns out that most NEON instructions have multi-cycle latency, which in
-    // the end outweighs any gains over the generic implementation.
-    if #[cfg(all(
-        target_feature = "sse2",
-        any(target_arch = "x86", target_arch = "x86_64"),
-        not(miri)
-    ))] {
-        mod sse2;
-        use sse2 as imp;
-    } else {
-        #[path = "generic.rs"]
-        mod generic;
-        use generic as imp;
-    }
-}
-
 mod bitmask;
 use bitmask::BitMaskIter;
 mod meta_data;
 
-use self::imp::match_byte;
+mod sse2;
+use self::sse2::match_byte;
 use meta_data::{
     bucket_full, bucket_moved, get_valid_bits, MetaData, ReserveResult, GROUP_MOVED_BIT_MASK,
 };
@@ -77,7 +55,7 @@ fn h1(hash: u64) -> usize {
     hash as usize
 }
 
-/// Secondary hash function, saved in the low 7 bits of the control byte.
+/// Secondary hash function, saved in the meta data.
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 fn h2(hash: u64) -> u8 {
@@ -86,7 +64,7 @@ fn h2(hash: u64) -> u8 {
     // instead, which means that the top 32 bits are 0 on 32-bit platforms.
     let hash_len = usize::min(std::mem::size_of::<usize>(), std::mem::size_of::<u64>());
     let top8 = hash >> (hash_len * 8 - 8);
-    (top8 & 0xff) as u8 // truncation
+    top8 as u8 // truncation
 }
 
 /// Returns the number of buckets needed to hold the given number of items,
@@ -95,16 +73,8 @@ fn h2(hash: u64) -> u8 {
 /// Returns `None` if an overflow occurs.
 #[inline]
 fn capacity_to_buckets(cap: usize) -> Option<usize> {
-    let adjusted_cap = if cap < 8 {
-        // Need at least 1 free bucket on small tables
-        cap + 1
-    } else {
-        // Otherwise require 1/8 buckets to be empty (87.5% load)
-        //
-        // Be careful when modifying this, calculate_layout relies on the
-        // overflow check here.
-        cap.checked_mul(8)? / 7
-    };
+    // require 1/8 buckets to be empty (87.5% load)
+    let adjusted_cap = cap.checked_mul(8)? / 7;
     // as there is 7 elemntes in each bucket
     let adjusted_buckets =
         if adjusted_cap % 7 == 0 { adjusted_cap / 7 } else { adjusted_cap / 7 + 1 };
@@ -129,10 +99,11 @@ struct Bucket<T> {
 
 impl<T> Bucket<T> {
     #[inline]
-    fn get_ref(&mut self, index: usize) -> &mut T {
+    fn get_ref_to_slot(&mut self, index: usize) -> &mut T {
         unsafe { self.refs.get_unchecked_mut(index) }
     }
 
+    // move all valid slots from this bucket to the next interner
     fn transfer_bucket(
         &mut self,
         mut group_meta_data: u64,
@@ -147,11 +118,30 @@ impl<T> Bucket<T> {
         let valid_bits = get_valid_bits(group_meta_data);
         let iter = BitMaskIter::new(valid_bits, 1);
         for index in iter {
-            let value = self.get_ref(index);
+            let value = self.get_ref_to_slot(index);
             let hash = hasher(value);
-            new_raw_interner.transfer_value(hash, *value);
+            new_raw_interner.transfer_value(hash);
+            match new_raw_interner.transfer_value(hash) {
+                LockResult::ResizeNeeded => panic!("ResizeNeeded during transfer"),
+                LockResult::Moved => panic!("Moved during transfer"),
+                LockResult::Locked(locked_data) => {
+                    new_raw_interner.unlock_and_set_value(hash, *value, locked_data);
+                }
+                LockResult::Found(_) => panic!("can not be fund in new interner during transfer"),
+            }
         }
     }
+}
+pub(crate) struct LockedData {
+    pos: usize,
+    index: usize,
+    group_meta_data: u64,
+}
+pub(crate) enum LockResult<T> {
+    ResizeNeeded,
+    Moved,
+    Locked(LockedData),
+    Found(T),
 }
 
 /// A raw hash table with an unsafe API.
@@ -160,13 +150,16 @@ pub(crate) struct RawInterner<T> {
     // number of buckets in the table.
     bucket_mask: usize,
 
-    // Pointer to the array of control bytes
+    // Pointer to the array of Buckets
     buckets: NonNull<Bucket<T>>,
 
     // Number of buckets that is checked before the table is resized
     resize_limit: usize,
 
+    // Pointer to the next interner created during resize
     next_raw_interner: AtomicPtr<RawInterner<T>>,
+    // count the slots that have not been moved when the bucket was moved due to the slot was looked at the time of the bucket move
+    to_be_moved: AtomicIsize,
 }
 
 impl<T> Drop for RawInterner<T> {
@@ -198,6 +191,7 @@ where
             bucket_mask: 0,
             resize_limit: 0,
             next_raw_interner: AtomicPtr::new(ptr::null_mut()),
+            to_be_moved: AtomicIsize::new(0),
         }
     }
 
@@ -216,6 +210,7 @@ where
             bucket_mask: buckets - 1,
             resize_limit: buckets_to_resize_limit(buckets),
             next_raw_interner: AtomicPtr::new(ptr::null_mut()),
+            to_be_moved: AtomicIsize::new(0),
         }
     }
 
@@ -253,17 +248,22 @@ where
         let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
         self.next_raw_interner.store(new_raw_interner, Ordering::Release);
         let new_raw_interner = unsafe { &mut *new_raw_interner };
-        for pos in 0..self.bucket_mask + 1 {
+        let mut to_be_moved = 0;
+        for pos in 0..self.bucket_mask {
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             bucket.transfer_bucket(group_meta_data, new_raw_interner, &hasher);
         }
+        to_be_moved += self.to_be_moved.fetch_add(to_be_moved, Ordering::Relaxed);
+        if to_be_moved == 0 {
+            // all slots have been moved the new table can replace this table as it contains all slots from this table
+        }
         new_raw_interner
     }
 
-    /// Searches for an element in the table.
+    /// Searches for an element in the table and if not found lockes a slot to be able to add the element
     #[inline]
-    pub(crate) fn intern<Q>(&mut self, hash: u64, value: &Q, make: impl FnOnce() -> T) -> Option<T>
+    pub(crate) fn lock_or_get_slot<Q>(&mut self, hash: u64, value: &Q) -> LockResult<T>
     where
         T: Borrow<Q>,
         Q: Sync + Send + Eq,
@@ -275,9 +275,9 @@ where
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
-                let result = bucket.get_ref(index);
+                let result = bucket.get_ref_to_slot(index);
                 if (*value).eq((*result).borrow()) {
-                    return Some(*result);
+                    return LockResult::Found(*result);
                 }
             }
 
@@ -292,43 +292,38 @@ where
             let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
             let mut group_meta_data = group_meta_data;
             for index in iter {
-                match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index) {
-                    ReserveResult::Reserved => {}
+                match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index, true) {
+                    ReserveResult::Reserved => {
+                        return LockResult::Locked(LockedData { pos, index, group_meta_data });
+                    }
+                    // needs to continue checking as there can still be
                     ReserveResult::AlreadyReservedWithOtherH2 | ReserveResult::Moved => {
                         continue;
                     }
                     ReserveResult::Occupied => {
-                        let result = bucket.get_ref(index);
+                        let result = bucket.get_ref_to_slot(index);
                         if value.eq((*result).borrow()) {
-                            return Some(*result);
+                            return LockResult::Found(*result);
                         }
                         continue;
                     }
                 }
-                let result = make();
-                *bucket.get_ref(index) = result;
-
-                if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index) {
-                    self.get_next_raw_interner().unwrap().transfer_value(hash, result);
-                }
-                return Some(result);
             }
-            if bucket_moved(group_meta_data) {
-                return None;
+            if !bucket_full(group_meta_data) && bucket_moved(group_meta_data) {
+                return LockResult::Moved;
             }
         }
-        None
+        LockResult::ResizeNeeded
     }
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
     // this function is used for resize and the value is then in the previous instance of 'RawInterner'.
-    pub(crate) fn transfer_value(&mut self, hash: u64, value: T) -> Option<T> {
+    pub(crate) fn transfer_value(&mut self, hash: u64) -> LockResult<T> {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
             let group_meta_data = bucket.meta_data.get_metadata_relaxed();
-            let valid_bits = get_valid_bits(group_meta_data);
 
             if bucket_full(group_meta_data) {
                 // this bucket is full try the next bucket
@@ -338,26 +333,46 @@ where
             // the bucket was not full when the metadata was fetched but new values can have been added
             // during the search but even if the metadata have been updated and the index is now used the
             // value needs to be check as it can be the value that shall be added
+            let valid_bits = get_valid_bits(group_meta_data);
             let iter = BitMaskIter::new((!valid_bits) & 0x7F, 1);
             let mut group_meta_data = group_meta_data;
             for index in iter {
-                match bucket.meta_data.only_reserve(&mut group_meta_data, index) {
-                    ReserveResult::Reserved => {}
-                    ReserveResult::AlreadyReservedWithOtherH2
-                    | ReserveResult::Occupied
-                    | ReserveResult::Moved => {
+                match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index, false) {
+                    ReserveResult::Reserved => {
+                        return LockResult::Locked(LockedData { pos, index, group_meta_data });
+                    }
+                    ReserveResult::AlreadyReservedWithOtherH2 | ReserveResult::Occupied => {
                         continue;
                     }
+                    ReserveResult::Moved => {
+                        return LockResult::Moved; // no need to update this table as as there is a newer table
+                    }
                 }
-
-                *bucket.get_ref(index) = value;
-
-                if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index) {
-                    self.get_next_raw_interner().unwrap().transfer_value(hash, value);
-                }
-                return Some(value);
+            }
+            if !bucket_full(group_meta_data) && bucket_moved(group_meta_data) {
+                return LockResult::Moved;
             }
         }
-        None
+        LockResult::ResizeNeeded
+    }
+
+    // unlock the slot by marking the element as valid unparks all threads blocked on this slot
+    // and if the bucket is moved transer the value to the new interner also.
+    #[inline]
+    pub(crate) fn unlock_and_set_value(&mut self, hash: u64, value: T, locked_data: LockedData) {
+        let LockedData { pos, index, group_meta_data } = locked_data;
+        // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
+        let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
+        *bucket.get_ref_to_slot(index) = value;
+
+        let h2 = h2(hash);
+        if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2 as u64, index) {
+            self.to_be_moved.fetch_sub(1, Ordering::Relaxed);
+            panic!("Moved during transfer");
+            // let raw_interner = self.get_next_raw_interner().unwrap();
+            // let locked_data = raw_interner.transfer_value(hash);
+            // let LockResult::Locked(locked_data) = locked_data;
+            // raw_interner.unlock_and_set_value(hash, value, locked_data);
+        }
     }
 }
