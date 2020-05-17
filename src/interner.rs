@@ -330,7 +330,6 @@ fn intern_ref3() {
 }
 
 #[test]
-#[ignore]
 fn single_threaded_resize() {
     use fxhash::FxBuildHasher;
     const ITER: u64 = 1024;

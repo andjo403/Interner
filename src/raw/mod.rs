@@ -120,7 +120,6 @@ impl<T> Bucket<T> {
         for index in iter {
             let value = self.get_ref_to_slot(index);
             let hash = hasher(value);
-            new_raw_interner.transfer_value(hash);
             match new_raw_interner.transfer_value(hash) {
                 LockResult::ResizeNeeded => panic!("ResizeNeeded during transfer"),
                 LockResult::Moved => panic!("Moved during transfer"),

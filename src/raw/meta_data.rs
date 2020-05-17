@@ -199,20 +199,20 @@ impl MetaData {
             }
             let new_group_meta_data =
                 (group_meta_data & !h2_bits(0xff, index)) | valid_bit(index) | h2_bits(h2, index);
-            if let Some(new_meta_data) = self
-                .meta_data
-                .compare_exchange_weak(
-                    group_meta_data,
-                    new_group_meta_data,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                )
-                .err()
-            {
-                group_meta_data = new_meta_data;
-                continue;
+            match self.meta_data.compare_exchange_weak(
+                group_meta_data,
+                new_group_meta_data,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    break;
+                }
+                Err(new_meta_data) => {
+                    group_meta_data = new_meta_data;
+                    continue;
+                }
             }
-            break;
         }
         if park_bit {
             self.unpark_all(index);
