@@ -235,13 +235,13 @@ impl MetaData {
         self.meta_data.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn mark_as_moved(&self, group_meta_data: &mut u64) -> Option<()> {
+    pub(crate) fn mark_as_moved(&self, group_meta_data: &mut u64) -> bool {
         let old_group_meta_data = self.meta_data.fetch_or(GROUP_MOVED_BIT_MASK, Ordering::Release);
         *group_meta_data = old_group_meta_data | GROUP_MOVED_BIT_MASK;
         if bucket_moved(old_group_meta_data) {
-            return None;
+            return false;
         }
-        return Some(());
+        return true;
     }
 }
 

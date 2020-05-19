@@ -187,9 +187,10 @@ where
                         if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
                             raw_interner = new_raw_interner;
                         } else {
-                            raw_interner =
-                                raw_interner.resize(|x| make_hash(&self.hash_builder, x));
-                            //self.raw_interner.store(raw_interner, Ordering::Relaxed);
+                            let new_raw_interner = raw_interner.create_and_stor_next_raw_interner();
+                            raw_interner
+                                .transfer(new_raw_interner, |x| make_hash(&self.hash_builder, x));
+                            raw_interner = new_raw_interner;
                         }
                     }
                 }

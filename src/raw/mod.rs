@@ -112,7 +112,7 @@ impl<T> Bucket<T> {
     ) where
         T: Sync + Send + Copy,
     {
-        if self.meta_data.mark_as_moved(&mut group_meta_data).is_none() {
+        if !self.meta_data.mark_as_moved(&mut group_meta_data) {
             return; //already moved
         }
         let valid_bits = get_valid_bits(group_meta_data);
@@ -241,12 +241,14 @@ where
         if next.is_null() { None } else { Some(unsafe { &mut *next }) }
     }
 
-    pub(crate) fn resize(&self, hasher: impl Fn(&T) -> u64) -> &mut Self {
+    pub(crate) fn create_and_stor_next_raw_interner(&self) -> &mut Self {
         let new_number_of_buckets = (self.bucket_mask + 1) * 2;
         let boxed_new_raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
         let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
         self.next_raw_interner.store(new_raw_interner, Ordering::Release);
-        let new_raw_interner = unsafe { &mut *new_raw_interner };
+        unsafe { &mut *new_raw_interner }
+    }
+    pub(crate) fn transfer(&self, new_raw_interner: &mut Self, hasher: impl Fn(&T) -> u64) {
         let mut to_be_moved = 0;
         for pos in 0..self.bucket_mask {
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
@@ -257,7 +259,6 @@ where
         if to_be_moved == 0 {
             // all slots have been moved the new table can replace this table as it contains all slots from this table
         }
-        new_raw_interner
     }
 
     /// Searches for an element in the table and if not found lockes a slot to be able to add the element
