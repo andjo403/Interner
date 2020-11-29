@@ -7,6 +7,7 @@
 
 #![feature(core_intrinsics)]
 #![feature(alloc_layout_extra)]
+#![feature(negative_impls)]
 
 mod raw;
 

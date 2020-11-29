@@ -20,11 +20,12 @@ fn create_and_drop(c: &mut Criterion) {
 }
 
 fn task_create_and_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
-    let map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    (0..ITER).into_par_iter().for_each(|i: u64| {
+    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    let tempInterner = interner.clone();
+    (0..ITER).into_par_iter().for_each_with(tempInterner, |map, i: u64| {
         map.intern_ref(&i, || values.get(i as usize).unwrap());
     });
-    map
+    interner
 }
 
 fn create_and_intern_u64refs(c: &mut Criterion) {
@@ -47,9 +48,9 @@ fn create_and_intern_u64refs(c: &mut Criterion) {
     group.finish();
 }
 
-fn task_get_interned_u64refs(interner: &Interner<&'_ u64>) {
-    (0..ITER).into_par_iter().for_each(|i: u64| {
-        interner.intern_ref(&i, || unimplemented!());
+fn task_get_interned_u64refs(interner: Interner<&'_ u64>) {
+    (0..ITER).into_par_iter().for_each_with(interner, |map, i: u64| {
+        map.intern_ref(&i, || unimplemented!());
     });
 }
 
@@ -58,7 +59,6 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
     group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
     let values: Vec<u64> = (0..ITER).collect();
-    let interner = task_create_and_intern_u64refs(values.as_slice());
 
     for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
         group.bench_with_input(
@@ -66,7 +66,10 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
             &threads,
             |bencher, &threads| {
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-                pool.install(|| bencher.iter(|| task_get_interned_u64refs(&interner)));
+                pool.install(|| {
+                    let interner = task_create_and_intern_u64refs(values.as_slice());
+                    bencher.iter(|| task_get_interned_u64refs(interner.clone()))
+                });
             },
         );
     }

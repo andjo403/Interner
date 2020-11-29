@@ -1,9 +1,12 @@
+use core::hash::{BuildHasher, Hash, Hasher};
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::mem;
 use std::ptr;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 
 mod bitmask;
 use bitmask::BitMaskIter;
@@ -88,7 +91,11 @@ fn capacity_to_buckets(cap: usize) -> Option<usize> {
 /// Returns the maximum number of buckets to check before a resize is triggered.
 #[inline]
 fn buckets_to_resize_limit(buckets: usize) -> usize {
-    if buckets <= 64 { 1 } else { 4 }
+    if buckets <= 64 {
+        1
+    } else {
+        4
+    }
 }
 
 #[repr(align(64))]
@@ -143,6 +150,13 @@ pub(crate) enum LockResult<T> {
     Found(T),
 }
 
+#[inline]
+pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
+    let mut state = hash_builder.build_hasher();
+    val.hash(&mut state);
+    state.finish()
+}
+
 /// A raw hash table with an unsafe API.
 pub(crate) struct RawInterner<T> {
     // Mask to get an index from a hash value. The value is one less than the
@@ -159,6 +173,8 @@ pub(crate) struct RawInterner<T> {
     next_raw_interner: AtomicPtr<RawInterner<T>>,
     // count the slots that have not been moved when the bucket was moved due to the slot was looked at the time of the bucket move
     to_be_moved: AtomicIsize,
+    resize_lock: Mutex<()>,
+    phantom: PhantomData<T>,
 }
 
 impl<T> Drop for RawInterner<T> {
@@ -191,6 +207,8 @@ where
             resize_limit: 0,
             next_raw_interner: AtomicPtr::new(ptr::null_mut()),
             to_be_moved: AtomicIsize::new(0),
+            resize_lock: Mutex::new(()),
+            phantom: PhantomData,
         }
     }
 
@@ -210,6 +228,8 @@ where
             resize_limit: buckets_to_resize_limit(buckets),
             next_raw_interner: AtomicPtr::new(ptr::null_mut()),
             to_be_moved: AtomicIsize::new(0),
+            resize_lock: Mutex::new(()),
+            phantom: PhantomData,
         }
     }
 
@@ -238,7 +258,11 @@ where
 
     pub(crate) fn get_next_raw_interner(&self) -> Option<&mut Self> {
         let next = self.next_raw_interner.load(Ordering::Acquire);
-        if next.is_null() { None } else { Some(unsafe { &mut *next }) }
+        if next.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *next })
+        }
     }
 
     pub(crate) fn create_and_stor_next_raw_interner(&self) -> &mut Self {
@@ -373,6 +397,56 @@ where
             // let locked_data = raw_interner.transfer_value(hash);
             // let LockResult::Locked(locked_data) = locked_data;
             // raw_interner.unlock_and_set_value(hash, value, locked_data);
+        }
+    }
+}
+
+impl<T> RawInterner<T>
+where
+    T: Sync + Send + Copy + Hash,
+{
+    #[inline]
+    pub fn intern_ref<Q: Sized>(
+        &mut self,
+        hash_builder: &impl BuildHasher,
+        value: &Q,
+        make: impl FnOnce() -> T,
+    ) -> T
+    where
+        T: Sync + Send + Borrow<Q> + Copy,
+        Q: Sync + Send + Hash + Eq,
+    {
+        let hash = make_hash(hash_builder, value);
+        let mut raw_interner = self;
+        loop {
+            match raw_interner.lock_or_get_slot(hash, value) {
+                LockResult::Found(result) => {
+                    return result;
+                }
+                LockResult::Locked(locked_data) => {
+                    let result = make();
+                    raw_interner.unlock_and_set_value(hash, result, locked_data);
+                    return result;
+                }
+                LockResult::ResizeNeeded => {
+                    if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
+                        raw_interner = new_raw_interner;
+                    } else {
+                        let _guard = raw_interner.resize_lock.lock();
+                        if let Some(new_raw_interner) = raw_interner.get_next_raw_interner() {
+                            raw_interner = new_raw_interner;
+                        } else {
+                            let new_raw_interner = raw_interner.create_and_stor_next_raw_interner();
+                            raw_interner.transfer(new_raw_interner, |x| make_hash(hash_builder, x));
+                            raw_interner = new_raw_interner;
+                        }
+                    }
+                }
+                LockResult::Moved => {
+                    raw_interner = raw_interner.get_next_raw_interner().unwrap();
+                    continue;
+                }
+            }
         }
     }
 }
