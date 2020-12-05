@@ -138,12 +138,12 @@ impl<T> Bucket<T> {
         }
     }
 }
-pub(crate) struct LockedData {
+struct LockedData {
     pos: usize,
     index: usize,
     group_meta_data: u64,
 }
-pub(crate) enum LockResult<T> {
+enum LockResult<T> {
     ResizeNeeded,
     Moved,
     Locked(LockedData),
@@ -151,7 +151,7 @@ pub(crate) enum LockResult<T> {
 }
 
 #[inline]
-pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
+fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
     let mut state = hash_builder.build_hasher();
     val.hash(&mut state);
     state.finish()
@@ -256,7 +256,7 @@ where
         }
     }
 
-    pub(crate) fn get_next_raw_interner(&self) -> Option<&mut Self> {
+    fn get_next_raw_interner(&self) -> Option<&mut Self> {
         let next = self.next_raw_interner.load(Ordering::Acquire);
         if next.is_null() {
             None
@@ -265,14 +265,14 @@ where
         }
     }
 
-    pub(crate) fn create_and_stor_next_raw_interner(&self) -> &mut Self {
+    fn create_and_stor_next_raw_interner(&self) -> &mut Self {
         let new_number_of_buckets = (self.bucket_mask + 1) * 2;
         let boxed_new_raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
         let new_raw_interner = Box::into_raw(boxed_new_raw_interner);
         self.next_raw_interner.store(new_raw_interner, Ordering::Release);
         unsafe { &mut *new_raw_interner }
     }
-    pub(crate) fn transfer(&self, new_raw_interner: &mut Self, hasher: impl Fn(&T) -> u64) {
+    fn transfer(&self, new_raw_interner: &mut Self, hasher: impl Fn(&T) -> u64) {
         let mut to_be_moved = 0;
         for pos in 0..self.bucket_mask {
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
@@ -287,7 +287,7 @@ where
 
     /// Searches for an element in the table and if not found lockes a slot to be able to add the element
     #[inline]
-    pub(crate) fn lock_or_get_slot<Q>(&mut self, hash: u64, value: &Q) -> LockResult<T>
+    fn lock_or_get_slot<Q>(&mut self, hash: u64, value: &Q) -> LockResult<T>
     where
         T: Borrow<Q>,
         Q: Sync + Send + Eq,
@@ -342,7 +342,7 @@ where
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
     // this function is used for resize and the value is then in the previous instance of 'RawInterner'.
-    pub(crate) fn transfer_value(&mut self, hash: u64) -> LockResult<T> {
+    fn transfer_value(&mut self, hash: u64) -> LockResult<T> {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
@@ -383,7 +383,7 @@ where
     // unlock the slot by marking the element as valid unparks all threads blocked on this slot
     // and if the bucket is moved transer the value to the new interner also.
     #[inline]
-    pub(crate) fn unlock_and_set_value(&mut self, hash: u64, value: T, locked_data: LockedData) {
+    fn unlock_and_set_value(&mut self, hash: u64, value: T, locked_data: LockedData) {
         let LockedData { pos, index, group_meta_data } = locked_data;
         // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
         let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
