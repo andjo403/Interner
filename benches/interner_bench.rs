@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 type Interner<T> = Inter<T, FxBuildHasher>;
 
-const ITER: u64 = 32 * 1024;
+const ITER: u32 = 32 * 1024;
 
 fn task_create_and_drop() {
     let value1 = 42;
@@ -19,20 +19,20 @@ fn create_and_drop(c: &mut Criterion) {
     group.finish();
 }
 
-fn task_create_and_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
+fn task_create_and_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
     let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
     let tempInterner = interner.clone();
-    (0..ITER).into_par_iter().for_each_with(tempInterner, |map, i: u64| {
+    (0..ITER).into_par_iter().for_each_with(tempInterner, |map, i: u32| {
         map.intern_ref(&i, || values.get(i as usize).unwrap());
     });
     interner
 }
 
-fn create_and_intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/create_and_intern_u64refs");
+fn create_and_intern_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/create_and_intern_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
-    let values: Vec<u64> = (0..ITER).collect();
+    let values: Vec<u32> = (0..ITER).collect();
 
     for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
         group.bench_with_input(
@@ -40,7 +40,7 @@ fn create_and_intern_u64refs(c: &mut Criterion) {
             &threads,
             |bencher, &threads| {
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-                pool.install(|| bencher.iter(|| task_create_and_intern_u64refs(values.as_slice())));
+                pool.install(|| bencher.iter(|| task_create_and_intern_u32refs(values.as_slice())));
             },
         );
     }
@@ -48,17 +48,17 @@ fn create_and_intern_u64refs(c: &mut Criterion) {
     group.finish();
 }
 
-fn task_get_interned_u64refs(interner: Interner<&'_ u64>) {
-    (0..ITER).into_par_iter().for_each_with(interner, |map, i: u64| {
+fn task_get_interned_u32refs(interner: Interner<&'_ u32>) {
+    (0..ITER).into_par_iter().for_each_with(interner, |map, i: u32| {
         map.intern_ref(&i, || unimplemented!());
     });
 }
 
-fn get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/get_already_interned_u64refs");
+fn get_already_interned_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/get_already_interned_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
-    let values: Vec<u64> = (0..ITER).collect();
+    let values: Vec<u32> = (0..ITER).collect();
 
     for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
         group.bench_with_input(
@@ -67,8 +67,8 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
             |bencher, &threads| {
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
                 pool.install(|| {
-                    let interner = task_create_and_intern_u64refs(values.as_slice());
-                    bencher.iter(|| task_get_interned_u64refs(interner.clone()))
+                    let interner = task_create_and_intern_u32refs(values.as_slice());
+                    bencher.iter(|| task_get_interned_u32refs(interner.clone()))
                 });
             },
         );
@@ -77,47 +77,47 @@ fn get_already_interned_u64refs(c: &mut Criterion) {
     group.finish();
 }
 
-fn single_task_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
+fn single_task_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
     let map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    (0..ITER).for_each(|i: u64| {
+    (0..ITER).for_each(|i: u32| {
         map.intern_ref(&i, || values.get(i as usize).unwrap());
     });
     map
 }
 
-fn single_intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/single_thread_intern_u64refs");
+fn single_intern_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/single_thread_intern_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
+    let values: Vec<u32> = (0..ITER).collect();
     group.bench_function("1", |bencher| {
-        bencher.iter(|| single_task_intern_u64refs(values.as_slice()))
+        bencher.iter(|| single_task_intern_u32refs(values.as_slice()))
     });
     group.finish();
 }
 
-fn single_task_get_interned_u64refs(interner: &mut Interner<&'_ u64>) {
-    (0..ITER).for_each(|i: u64| {
+fn single_task_get_interned_u32refs(interner: &mut Interner<&'_ u32>) {
+    (0..ITER).for_each(|i: u32| {
         interner.intern_ref(&i, || unimplemented!());
     });
 }
 
-fn single_get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/single_thread_get_already_interned_u64refs");
+fn single_get_already_interned_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/single_thread_get_already_interned_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
-    let mut interner = task_create_and_intern_u64refs(values.as_slice());
+    let values: Vec<u32> = (0..ITER).collect();
+    let mut interner = task_create_and_intern_u32refs(values.as_slice());
     group.bench_function("1", |bencher| {
-        bencher.iter(|| single_task_get_interned_u64refs(&mut interner))
+        bencher.iter(|| single_task_get_interned_u32refs(&mut interner))
     });
     group.finish();
 }
 
 criterion_group!(
     benches,
-    single_intern_u64refs,
-    single_get_already_interned_u64refs,
+    single_intern_u32refs,
+    single_get_already_interned_u32refs,
     create_and_drop,
-    get_already_interned_u64refs,
-    create_and_intern_u64refs
+    get_already_interned_u32refs,
+    create_and_intern_u32refs
 );
 criterion_main!(benches);

@@ -35,7 +35,7 @@ where
     }
 }
 
-const ITER: u64 = 32 * 1024;
+const ITER: u32 = 32 * 1024;
 
 fn task_create_and_drop() {
     let value1 = 42;
@@ -49,36 +49,36 @@ fn create_and_drop(c: &mut Criterion) {
     group.finish();
 }
 
-fn task_create_and_intern_u64refs(values: &[u64]) -> Interner<&'_ u64> {
+fn task_create_and_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
     let mut map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    (0..ITER).for_each(|i: u64| {
+    (0..ITER).for_each(|i: u32| {
         intern_ref(&mut map, &i, || values.get(i as usize).unwrap());
     });
     map
 }
 
-fn create_and_intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u64refs");
+fn create_and_intern_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
+    let values: Vec<u32> = (0..ITER).collect();
     group.bench_function("1", |bencher| {
-        bencher.iter(|| task_create_and_intern_u64refs(values.as_slice()))
+        bencher.iter(|| task_create_and_intern_u32refs(values.as_slice()))
     });
     group.finish();
 }
 
-fn task_get_interned_u64refs(mut interner: &mut Interner<&'_ u64>) {
-    (0..ITER).for_each(|i: u64| {
+fn task_get_interned_u32refs(mut interner: &mut Interner<&'_ u32>) {
+    (0..ITER).for_each(|i: u32| {
         intern_ref(&mut interner, &i, || unimplemented!());
     });
 }
 
-fn get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u64refs");
+fn get_already_interned_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u32refs");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
-    let mut interner = task_create_and_intern_u64refs(values.as_slice());
-    group.bench_function("1", |bencher| bencher.iter(|| task_get_interned_u64refs(&mut interner)));
+    let values: Vec<u32> = (0..ITER).collect();
+    let mut interner = task_create_and_intern_u32refs(values.as_slice());
+    group.bench_function("1", |bencher| bencher.iter(|| task_get_interned_u32refs(&mut interner)));
     group.finish();
 }
 
@@ -95,37 +95,37 @@ fn mutex_create_and_drop(c: &mut Criterion) {
     group.finish();
 }
 
-fn mutex_task_create_and_intern_u64refs(values: &[u64]) {
+fn mutex_task_create_and_intern_u32refs(values: &[u32]) {
     let map =
         Mutex::new(Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default()));
-    (0..ITER).for_each(|i: u64| {
+    (0..ITER).for_each(|i: u32| {
         intern_ref(&mut map.lock().unwrap(), &i, || values.get(i as usize).unwrap());
     });
 }
 
-fn mutex_create_and_intern_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u64refs_lock");
+fn mutex_create_and_intern_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_create_and_intern_u32refs_lock");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
+    let values: Vec<u32> = (0..ITER).collect();
     group.bench_function("1", |bencher| {
-        bencher.iter(|| mutex_task_create_and_intern_u64refs(values.as_slice()))
+        bencher.iter(|| mutex_task_create_and_intern_u32refs(values.as_slice()))
     });
     group.finish();
 }
 
-fn mutex_task_get_interned_u64refs(interner: &mut Mutex<Interner<&'_ u64>>) {
-    (0..ITER).for_each(|i: u64| {
+fn mutex_task_get_interned_u32refs(interner: &mut Mutex<Interner<&'_ u32>>) {
+    (0..ITER).for_each(|i: u32| {
         intern_ref(&mut interner.lock().unwrap(), &i, || unimplemented!());
     });
 }
 
-fn mutex_get_already_interned_u64refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u64refs_lock");
+fn mutex_get_already_interned_u32refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Hashmap/single_thread_get_already_interned_u32refs_lock");
     group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u64> = (0..ITER).collect();
-    let mut interner = Mutex::new(task_create_and_intern_u64refs(values.as_slice()));
+    let values: Vec<u32> = (0..ITER).collect();
+    let mut interner = Mutex::new(task_create_and_intern_u32refs(values.as_slice()));
     group.bench_function("1", |bencher| {
-        bencher.iter(|| mutex_task_get_interned_u64refs(&mut interner))
+        bencher.iter(|| mutex_task_get_interned_u32refs(&mut interner))
     });
     group.finish();
 }
@@ -133,10 +133,10 @@ fn mutex_get_already_interned_u64refs(c: &mut Criterion) {
 criterion_group!(
     benches,
     create_and_drop,
-    get_already_interned_u64refs,
-    create_and_intern_u64refs,
+    get_already_interned_u32refs,
+    create_and_intern_u32refs,
     mutex_create_and_drop,
-    mutex_get_already_interned_u64refs,
-    mutex_create_and_intern_u64refs
+    mutex_get_already_interned_u32refs,
+    mutex_create_and_intern_u32refs
 );
 criterion_main!(benches);
