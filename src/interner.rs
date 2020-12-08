@@ -142,7 +142,7 @@ where
     ///
     /// let value1 :i32 = 42;
     /// let value2 :i32 = 300;
-    /// let interner: Interner<&i32> = Interner::with_capacity(2);
+    /// let mut interner: Interner<&i32> = Interner::with_capacity(2);
     /// let result = interner.intern_ref(&value1,|| {&value1});
     /// assert_eq!(&value1,result);
     /// let result = interner.intern_ref(&value2,|| {&value2});
@@ -151,13 +151,18 @@ where
     /// assert_eq!(&value2,result);
     /// ```
     #[inline]
-    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl FnOnce() -> T) -> T
+    pub fn intern_ref<Q: Sized>(&mut self, value: &Q, make: impl FnOnce() -> T) -> T
     where
         T: Sync + Send + Borrow<Q> + Copy,
         Q: Sync + Send + Hash + Eq,
     {
         let raw_interner = unsafe { &mut *(self.raw_interner.get()) };
-        raw_interner.intern_ref(self.hash_builder.as_ref(), value, make)
+        let (result, next_interner) =
+            raw_interner.intern_ref(self.hash_builder.as_ref(), value, make);
+        if let Some(new_raw_interner) = next_interner {
+            self.raw_interner = new_raw_interner;
+        }
+        result
     }
 }
 
@@ -211,7 +216,7 @@ mod tests {
         let value5: i32 = 33;
         let value6: i32 = 34;
         let value7: i32 = 42;
-        let interner: Interner<&i32> = Interner::with_capacity(7);
+        let mut interner: Interner<&i32> = Interner::with_capacity(7);
 
         let result = interner.intern_ref(&value1, || &value1);
         assert_eq!(&value1, result);
@@ -245,7 +250,7 @@ mod tests {
         let vector2 = vector.clone();
         let slice = vector2.as_ptr();
 
-        let interner = Interner::<&isize, FxBuildHasher>::with_capacity_and_hasher(
+        let mut interner = Interner::<&isize, FxBuildHasher>::with_capacity_and_hasher(
             ITER as usize,
             FxBuildHasher::default(),
         );
@@ -272,7 +277,8 @@ mod tests {
         let values = values.into_boxed_slice();
 
         let hashbuilder = FxBuildHasher::default();
-        let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+        let mut interner =
+            Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
         (1..ITER).into_iter().for_each(|i: u64| {
             interner.intern_ref(&i, || values.get(i as usize).unwrap());
             interner.intern_ref(&i, || {
@@ -288,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_threaded_intern_ref3_rayon() {
+    fn multi_threaded_intern_ref3() {
         use fxhash::FxBuildHasher;
         use rayon::prelude::*;
         use std::sync::Arc;
@@ -297,7 +303,7 @@ mod tests {
 
         let interner1: Interner<&u64, FxBuildHasher> =
             Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-        let interner2 = interner1.clone();
+        let mut interner2 = interner1.clone();
         (1..ITER).into_par_iter().for_each_with(interner1, |interner, i: u64| {
             interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
             let result = interner.intern_ref(&i, || unimplemented!());
@@ -313,12 +319,12 @@ mod tests {
     #[test]
     fn single_threaded_resize() {
         use fxhash::FxBuildHasher;
-        const ITER: u64 = 1024;
+        const ITER: u64 = 1026;
         let values: Vec<u64> = (0..ITER).collect();
         let values = values.into_boxed_slice();
 
         let hashbuilder = FxBuildHasher::default();
-        let interner = Interner::with_hasher(hashbuilder.clone());
+        let mut interner = Interner::with_hasher(hashbuilder.clone());
         (1..ITER).into_iter().for_each(|i: u64| {
             interner.intern_ref(&i, || values.get(i as usize).unwrap());
             interner.intern_ref(&i, || {
@@ -330,6 +336,29 @@ mod tests {
             interner.intern_ref(&i, || {
                 unimplemented!("value: {}, Hash {:16x}", i, make_hash(&hashbuilder, &i))
             });
+        });
+    }
+
+    #[test]
+    fn multi_threaded_resize() {
+        use fxhash::FxBuildHasher;
+        use rayon::prelude::*;
+        use std::sync::Arc;
+        const ITER: u64 = 1026;
+        let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
+
+        let interner1: Interner<&u64, FxBuildHasher> =
+            Interner::with_hasher(FxBuildHasher::default());
+        let mut interner2 = interner1.clone();
+        (1..ITER).into_par_iter().for_each_with(interner1, |interner, i: u64| {
+            interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
+            let result = interner.intern_ref(&i, || unimplemented!());
+            assert_eq!(i, *result);
+        });
+
+        (1..ITER).into_iter().for_each(|i: u64| {
+            let result = interner2.intern_ref(&i, || unimplemented!());
+            assert_eq!(i, *result);
         });
     }
 }

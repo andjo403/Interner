@@ -81,6 +81,27 @@ pub(crate) fn bucket_full(group_meta_data: u64) -> bool {
 }
 
 #[inline]
+pub(crate) fn any_free_slots(group_meta_data: u64) -> bool {
+    for i in 0..7 {
+        if !(valid_bit_set(group_meta_data, i) || lock_bit_set(group_meta_data, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+pub(crate) fn count_locked_slots(group_meta_data: u64) -> isize {
+    let mut count = 0;
+    for i in 0..7 {
+        if !valid_bit_set(group_meta_data, i) && lock_bit_set(group_meta_data, i) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[inline]
 pub(crate) fn get_valid_bits(group_meta_data: u64) -> u64 {
     (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)
 }
