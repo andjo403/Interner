@@ -9,7 +9,7 @@ const ITER: u32 = 32 * 1024;
 
 fn task_create_and_drop() {
     let value1 = 42;
-    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    let mut interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
     interner.intern_ref(&value1, || &value1);
 }
 
@@ -78,7 +78,7 @@ fn get_already_interned_u32refs(c: &mut Criterion) {
 }
 
 fn single_task_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
-    let map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    let mut map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
     (0..ITER).for_each(|i: u32| {
         map.intern_ref(&i, || values.get(i as usize).unwrap());
     });
