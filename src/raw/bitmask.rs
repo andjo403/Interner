@@ -1,5 +1,3 @@
-use core::intrinsics;
-
 /// A bit mask which contains the result of a `Match` operation on a `Group` and
 /// allows iterating through them.
 ///
@@ -28,13 +26,8 @@ impl Iterator for BitMaskIter {
 
     #[inline]
     fn next(&mut self) -> Option<usize> {
-        if self.bit_mask == 0 {
-            None
-        } else {
-            //safe due to bit_mask = 0 is checked
-            let result = unsafe { intrinsics::cttz_nonzero(self.bit_mask) as usize / self.stride };
-            self.bit_mask &= self.bit_mask - 1;
-            Some(result)
-        }
+        let bit_mask = std::num::NonZeroU64::new(self.bit_mask)?;
+        self.bit_mask &= self.bit_mask - 1;
+        Some(bit_mask.trailing_zeros() as usize / self.stride)
     }
 }
