@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 use parking_lot_core::{self, SpinWait, UnparkToken, DEFAULT_PARK_TOKEN};
 
 // UnparkToken used to indicate that reference is stored. not used only to have a value to set in unpark_all
@@ -118,10 +118,12 @@ impl MetaData {
         loop {
             let new_group_meta_data = *group_meta_data | h2_bits(h2 & 0xFC | LOCKED_BIT, index);
             if valid_bit_set(*group_meta_data, index) {
+                fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
             }
             if lock_bit_set(*group_meta_data, index) {
                 if !value_possibly_in_bucket {
+                    fence(Ordering::Acquire);
                     return ReserveResult::Occupied;
                 }
                 let h2bits = h2_bits(h2 as u64 & 0xFC, index);
@@ -158,6 +160,7 @@ impl MetaData {
         loop {
             if valid_bit_set(group_meta_data, index) {
                 *out_meta_data = group_meta_data;
+                fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
             }
 
@@ -184,7 +187,7 @@ impl MetaData {
             let addr = self as *const _ as usize + index;
             let validate = || self.meta_data.load(Ordering::Relaxed) == group_meta_data;
             let before_sleep = || {};
-            let timed_out = |_, _| {};
+            let timed_out = |_, _| unreachable!();
             // SAFETY:
             //   * `addr` is an address we control.
             //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
@@ -199,6 +202,8 @@ impl MetaData {
                     None,
                 );
             }
+            // Loop back and check if the valid bit was set
+            spinwait.reset();
             group_meta_data = self.meta_data.load(Ordering::Relaxed);
         }
     }
@@ -223,7 +228,7 @@ impl MetaData {
             match self.meta_data.compare_exchange_weak(
                 group_meta_data,
                 new_group_meta_data,
-                Ordering::Acquire,
+                Ordering::Release,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
@@ -252,8 +257,8 @@ impl MetaData {
     }
 
     #[inline]
-    pub fn get_metadata_relaxed(&self) -> u64 {
-        self.meta_data.load(Ordering::Relaxed)
+    pub fn get_metadata_acquire(&self) -> u64 {
+        self.meta_data.load(Ordering::Acquire)
     }
 
     pub(crate) fn mark_as_moved(&self, group_meta_data: &mut u64) -> bool {
@@ -271,7 +276,7 @@ fn reserve_reserved() {
     let meta_data = MetaData { meta_data: AtomicU64::new(0) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0xFD);
+    assert_eq!(meta_data.get_metadata_acquire(), 0xFD);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0xFD);
 }
@@ -281,7 +286,7 @@ fn reserve_reserved_index1() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xA8, 0)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xA8, 0);
     let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0x100_0000_0000_FDA8);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_FDA8);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0x100_0000_0000_FDA8);
 }
@@ -291,7 +296,7 @@ fn reserve_occupied() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0x100_0000_0000_00AB);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_00AB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
 }
@@ -305,7 +310,7 @@ fn reserve_occupied_index1() {
     };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0x300_0000_0000_AAAB);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_AAAB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
 }
@@ -315,7 +320,7 @@ fn reserve_already_reserved_with_other_h2() {
     let meta_data = MetaData { meta_data: AtomicU64::new(h2_bits(0xAD, 0)) };
     let mut group_meta_data = 0;
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0xAD);
+    assert_eq!(meta_data.get_metadata_acquire(), 0xAD);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0xAD);
 }
@@ -326,7 +331,7 @@ fn reserve_already_reserved_with_other_h2_index1() {
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
     let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1, true);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0x100_0000_0000_ADAB);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_ADAB);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
 }
@@ -337,5 +342,5 @@ fn set_valid() {
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
     meta_data.set_valid_and_unpark(group_meta_data, 0xA8, 1);
-    assert_eq!(meta_data.get_metadata_relaxed(), 0x300_0000_0000_A8AB);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_A8AB);
 }

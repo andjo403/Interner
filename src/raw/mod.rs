@@ -266,7 +266,7 @@ where
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
-            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
+            let group_meta_data = bucket.meta_data.get_metadata_acquire();
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref_to_slot(index);
@@ -316,7 +316,7 @@ where
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
-            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
+            let group_meta_data = bucket.meta_data.get_metadata_acquire();
 
             if bucket_full(group_meta_data) {
                 // this bucket is full try the next bucket
@@ -447,7 +447,7 @@ where
         let mut to_be_moved = 0;
         for pos in 0..self.bucket_mask + 1 {
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
-            let group_meta_data = bucket.meta_data.get_metadata_relaxed();
+            let group_meta_data = bucket.meta_data.get_metadata_acquire();
             to_be_moved += bucket.transfer_bucket(group_meta_data, new_raw_interner, hash_builder);
         }
         self.to_be_moved.fetch_add(to_be_moved + 1, Ordering::Release);
