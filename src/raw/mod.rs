@@ -115,13 +115,13 @@ impl<T> Bucket<T> {
     // move all valid slots from this bucket to the next interner
     fn transfer_bucket(
         &mut self,
-        mut group_meta_data: u64,
         new_raw_interner: &mut RawInterner<T>,
         hash_builder: &impl BuildHasher,
     ) -> isize
     where
         T: Sync + Send + Copy + Hash,
     {
+        let mut group_meta_data = 0;
         if !self.meta_data.mark_as_moved(&mut group_meta_data) {
             return 0; //already moved
         }
@@ -447,8 +447,7 @@ where
         let mut to_be_moved = 0;
         for pos in 0..self.bucket_mask + 1 {
             let bucket = unsafe { &mut *self.buckets.as_ptr().add(pos) };
-            let group_meta_data = bucket.meta_data.get_metadata_acquire();
-            to_be_moved += bucket.transfer_bucket(group_meta_data, new_raw_interner, hash_builder);
+            to_be_moved += bucket.transfer_bucket(new_raw_interner, hash_builder);
         }
         self.to_be_moved.fetch_add(to_be_moved + 1, Ordering::Release);
     }

@@ -198,7 +198,12 @@ unsafe impl<T, S> Send for Interner<T, S> {}
 mod tests {
 
     use super::*;
+    use fxhash::FxBuildHasher;
+    use rayon::prelude::*;
     use std::hash::Hasher;
+    use std::sync::Arc;
+
+    const ITER: u64 = 32; // * 1024;
 
     #[inline]
     pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
@@ -208,7 +213,6 @@ mod tests {
     }
     #[test]
     fn intern_ref() {
-        use super::Interner;
         let value1: i32 = 42;
         let value2: i32 = 0;
         let value3: i32 = 31;
@@ -239,10 +243,7 @@ mod tests {
 
     #[test]
     fn intern_ref2() {
-        use fxhash::FxBuildHasher;
-        const ITER: isize = 32 * 1024;
-
-        let mut vector = Vec::<isize>::with_capacity(ITER as usize + 100);
+        let mut vector = Vec::<u64>::with_capacity(ITER as usize + 100);
         for i in 0..ITER {
             vector.push(i);
         }
@@ -250,19 +251,19 @@ mod tests {
         let vector2 = vector.clone();
         let slice = vector2.as_ptr();
 
-        let mut interner = Interner::<&isize, FxBuildHasher>::with_capacity_and_hasher(
+        let mut interner = Interner::<&u64, FxBuildHasher>::with_capacity_and_hasher(
             ITER as usize,
             FxBuildHasher::default(),
         );
 
         for index in vector.iter() {
-            let reference = unsafe { &*slice.offset(*index) };
+            let reference = unsafe { &*slice.offset(*index as isize) };
             let result = interner.intern_ref(index, || index);
             assert_eq!(*reference, *result);
             assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
         }
         for index in vector.iter() {
-            let reference = unsafe { &*slice.offset(*index) };
+            let reference = unsafe { &*slice.offset(*index as isize) };
             let result = interner.intern_ref(index, || unimplemented!());
             assert_eq!(*reference, *result);
             assert_eq!(index as *const _ as *const (), result as *const _ as *const ());
@@ -271,8 +272,6 @@ mod tests {
 
     #[test]
     fn single_threaded_intern_ref3() {
-        use fxhash::FxBuildHasher;
-        const ITER: u64 = 1024;
         let values: Vec<u64> = (0..ITER).collect();
         let values = values.into_boxed_slice();
 
@@ -295,10 +294,6 @@ mod tests {
 
     #[test]
     fn multi_threaded_intern_ref3() {
-        use fxhash::FxBuildHasher;
-        use rayon::prelude::*;
-        use std::sync::Arc;
-        const ITER: u64 = 32 * 1024;
         let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
 
         let interner1: Interner<&u64, FxBuildHasher> =
@@ -318,8 +313,6 @@ mod tests {
 
     #[test]
     fn single_threaded_resize() {
-        use fxhash::FxBuildHasher;
-        const ITER: u64 = 1026;
         let values: Vec<u64> = (0..ITER).collect();
         let values = values.into_boxed_slice();
 
@@ -341,10 +334,6 @@ mod tests {
 
     #[test]
     fn multi_threaded_resize() {
-        use fxhash::FxBuildHasher;
-        use rayon::prelude::*;
-        use std::sync::Arc;
-        const ITER: u64 = 1026;
         let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
 
         let interner1: Interner<&u64, FxBuildHasher> =
