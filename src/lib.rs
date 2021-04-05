@@ -7,6 +7,8 @@
 
 #![feature(negative_impls)]
 #![feature(nonzero_leading_trailing_zeros)]
+#![feature(maybe_uninit_ref)]
+#![feature(maybe_uninit_extra)]
 
 mod raw;
 

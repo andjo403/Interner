@@ -1,36 +1,52 @@
 use super::bitmask::BitMaskIter;
-
-#[cfg(target_arch = "x86")]
-use core::arch::x86;
-#[cfg(target_arch = "x86_64")]
-use core::arch::x86_64 as x86;
-
-pub const BITMASK_STRIDE: usize = 1;
+use packed_simd::u8x8;
 
 /// Returns a `BitMask` indicating all hash bytes in the group which have
 /// the given value.
 ///
 /// This implementation uses 128-bit SSE instructions.
-/*
+#[cfg(not(feature = "no-simd"))]
 #[inline]
 pub(crate) fn match_byte(valid_bits: u64, hashes: u64, value: u8) -> BitMaskIter {
-    unsafe {
-        let hashes = x86::_mm_set_epi64x(0, hashes as i64);
-        let cmp = x86::_mm_cmpeq_epi8(hashes, x86::_mm_set1_epi8(value as i8));
-        BitMaskIter::new(x86::_mm_movemask_epi8(cmp) as u64 & valid_bits, BITMASK_STRIDE)
-    }
+    let hashes = u8x8::from_slice_aligned(&hashes.to_ne_bytes());
+    let values = u8x8::splat(value);
+    BitMaskIter::new(hashes.eq(values).bitmask() as u64 & valid_bits)
 }
-*/
+
+#[cfg(not(feature = "no-simd"))]
+pub(crate) fn count_locked_slots(valid_bits: u64, hashes: u64) -> isize {
+    let hashes = u8x8::from_slice_aligned(&hashes.to_ne_bytes());
+    let values = u8x8::from_slice_aligned(&0x0u64.to_ne_bytes());
+
+    (hashes.ne(values).bitmask() as u64 & valid_bits).count_ones() as isize
+}
+
+#[cfg(feature = "no-simd")]
 #[inline]
 pub(crate) fn match_byte(valid_bits: u64, hashes: u64, value: u8) -> BitMaskIter {
     let hashes = hashes.to_ne_bytes();
     let mut result: u64 = 0;
-    for i in 0..7 {
+    let iter = BitMaskIter::new(valid_bits);
+    for i in iter {
         if hashes[i] == value {
             result |= 1 << i;
         }
     }
-    BitMaskIter::new(result & valid_bits, BITMASK_STRIDE)
+    BitMaskIter::new(result & valid_bits)
+}
+
+#[cfg(feature = "no-simd")]
+pub(crate) fn count_locked_slots(valid_bits: u64, hashes: u64) -> isize {
+    let hashes = hashes.to_ne_bytes();
+    let mut possibly_locked: u64 = 0;
+    let iter = BitMaskIter::new(valid_bits);
+    for i in iter {
+        if hashes[i] != 0 {
+            possibly_locked |= 1 << i;
+        }
+    }
+
+    (possibly_locked & valid_bits).count_ones() as isize
 }
 
 #[cfg(test)]

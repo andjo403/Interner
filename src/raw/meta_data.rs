@@ -8,16 +8,13 @@ const TOKEN_VALUE_SET: UnparkToken = UnparkToken(0);
 const LOCKED_BIT: u64 = 0b1;
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
-pub const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
-/// This bit is set instead of h2 if valid bit is not set just before parking a thread.
-/// A thread is being parked if it wants to lock the mutex, but it is currently being held by some other thread.
-//const PARKED_BIT: u64 = 0b10;
+const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReserveResult {
     AlreadyReservedWithOtherH2,
     Reserved,
     Occupied,
-    Moved,
+    SlotAvailableButGroupMoved,
 }
 
 /// Once Reference type backed by the parking lot.
@@ -37,7 +34,7 @@ pub(crate) struct MetaData {
     ///      1      |     1      | The mutex is locked by exactly one thread. One or more thread is
     ///             |            | parked or about to park, waiting for the lock to become available.
     ///
-    /// |1 spare| 7 valid_bits| 7*8 h2 hash or lock and part of h2 hash when valid bit unset
+    /// |1 group moved bit | 7 slot valid bits| 7 slots of 8 bit h2 hash or 6 bit h2 hash and lock bits when valid bit unset
     meta_data: AtomicU64,
 }
 
@@ -46,7 +43,7 @@ fn valid_bit(index: usize) -> u64 {
     1 << (64 - 8 + index)
 }
 #[inline]
-fn valid_bit_set(group_meta_data: u64, index: usize) -> bool {
+fn test_valid_bit(group_meta_data: u64, index: usize) -> bool {
     group_meta_data & valid_bit(index) != 0
 }
 #[inline]
@@ -59,7 +56,7 @@ fn lock_bit(index: usize) -> u64 {
     1 << (8 * index)
 }
 #[inline]
-fn lock_bit_set(group_meta_data: u64, index: usize) -> bool {
+fn test_lock_bit(group_meta_data: u64, index: usize) -> bool {
     group_meta_data & lock_bit(index) != 0
 }
 
@@ -68,7 +65,7 @@ fn park_bit(index: usize) -> u64 {
     1 << (8 * index + 1)
 }
 #[inline]
-fn park_bit_set(group_meta_data: u64, index: usize) -> bool {
+fn test_park_bit(group_meta_data: u64, index: usize) -> bool {
     group_meta_data & park_bit(index) != 0
 }
 #[inline]
@@ -78,27 +75,6 @@ pub(crate) fn bucket_moved(group_meta_data: u64) -> bool {
 #[inline]
 pub(crate) fn bucket_full(group_meta_data: u64) -> bool {
     group_meta_data & GROUP_FULL_BIT_MASK == GROUP_FULL_BIT_MASK
-}
-
-#[inline]
-pub(crate) fn any_free_slots(group_meta_data: u64) -> bool {
-    for i in 0..7 {
-        if !(valid_bit_set(group_meta_data, i) || lock_bit_set(group_meta_data, i)) {
-            return true;
-        }
-    }
-    false
-}
-
-#[inline]
-pub(crate) fn count_locked_slots(group_meta_data: u64) -> isize {
-    let mut count = 0;
-    for i in 0..7 {
-        if !valid_bit_set(group_meta_data, i) && lock_bit_set(group_meta_data, i) {
-            count += 1;
-        }
-    }
-    count
 }
 
 #[inline]
@@ -116,12 +92,11 @@ impl MetaData {
         value_possibly_in_bucket: bool,
     ) -> ReserveResult {
         loop {
-            let new_group_meta_data = *group_meta_data | h2_bits(h2 & 0xFC | LOCKED_BIT, index);
-            if valid_bit_set(*group_meta_data, index) {
+            if test_valid_bit(*group_meta_data, index) {
                 fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
             }
-            if lock_bit_set(*group_meta_data, index) {
+            if test_lock_bit(*group_meta_data, index) {
                 if !value_possibly_in_bucket {
                     fence(Ordering::Acquire);
                     return ReserveResult::Occupied;
@@ -133,8 +108,9 @@ impl MetaData {
                 return ReserveResult::AlreadyReservedWithOtherH2;
             }
             if bucket_moved(*group_meta_data) {
-                return ReserveResult::Moved;
+                return ReserveResult::SlotAvailableButGroupMoved;
             }
+            let new_group_meta_data = *group_meta_data | h2_bits(h2 & 0xFC | LOCKED_BIT, index);
             match self.meta_data.compare_exchange_weak(
                 *group_meta_data,
                 new_group_meta_data,
@@ -158,20 +134,20 @@ impl MetaData {
         let mut group_meta_data = self.meta_data.load(Ordering::Relaxed);
         let mut spinwait = SpinWait::new();
         loop {
-            if valid_bit_set(group_meta_data, index) {
+            if test_valid_bit(group_meta_data, index) {
                 *out_meta_data = group_meta_data;
                 fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
             }
 
             // If there is no queue, try spinning a few times
-            if !park_bit_set(group_meta_data, index) && spinwait.spin() {
+            if !test_park_bit(group_meta_data, index) && spinwait.spin() {
                 group_meta_data = self.meta_data.load(Ordering::Relaxed);
                 continue;
             }
 
             // Set the parked bit
-            if !park_bit_set(group_meta_data, index) {
+            if !test_park_bit(group_meta_data, index) {
                 if let Err(x) = self.meta_data.compare_exchange_weak(
                     group_meta_data,
                     group_meta_data | park_bit(index),
@@ -220,7 +196,7 @@ impl MetaData {
             if bucket_moved(group_meta_data) {
                 moved = true;
             }
-            if park_bit_set(group_meta_data, index) {
+            if test_park_bit(group_meta_data, index) {
                 park_bit = true;
             }
             let new_group_meta_data =
@@ -264,10 +240,7 @@ impl MetaData {
     pub(crate) fn mark_as_moved(&self, group_meta_data: &mut u64) -> bool {
         let old_group_meta_data = self.meta_data.fetch_or(GROUP_MOVED_BIT_MASK, Ordering::AcqRel);
         *group_meta_data = old_group_meta_data | GROUP_MOVED_BIT_MASK;
-        if bucket_moved(old_group_meta_data) {
-            return false;
-        }
-        return true;
+        !bucket_moved(old_group_meta_data)
     }
 }
 

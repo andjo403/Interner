@@ -211,6 +211,12 @@ mod tests {
         val.hash(&mut state);
         state.finish()
     }
+
+    #[test]
+    fn drop_empty() {
+        let interner: Interner<&i32> = Interner::new();
+        drop(interner);
+    }
     #[test]
     fn intern_ref() {
         let value1: i32 = 42;
@@ -220,7 +226,7 @@ mod tests {
         let value5: i32 = 33;
         let value6: i32 = 34;
         let value7: i32 = 42;
-        let mut interner: Interner<&i32> = Interner::with_capacity(7);
+        let mut interner: Interner<&i32> = Interner::new();
 
         let result = interner.intern_ref(&value1, || &value1);
         assert_eq!(&value1, result);
