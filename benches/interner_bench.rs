@@ -1,46 +1,86 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fxhash::FxBuildHasher;
 use interner::Interner as Inter;
-use rayon::prelude::*;
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+    time::{Duration, Instant},
+};
 
 type Interner<T> = Inter<T, FxBuildHasher>;
 
 const ITER: u32 = 32 * 1024;
 
-fn task_create_and_drop() {
-    let value1 = 42;
-    let mut interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    interner.intern_ref(&value1, || &value1);
+#[derive(Clone)]
+struct MultithreadedBench<T> {
+    start: Arc<Barrier>,
+    end: Arc<Barrier>,
+    interner: T,
+    num_threads: usize,
 }
 
-fn create_and_drop(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/create_and_drop");
-    group.bench_function("1", |bencher| bencher.iter(|| task_create_and_drop()));
-    group.finish();
+impl<T: Send + Clone + 'static> MultithreadedBench<T> {
+    fn new(interner: T, num_threads: usize) -> Self {
+        Self {
+            start: Arc::new(Barrier::new(num_threads + 1)),
+            end: Arc::new(Barrier::new(num_threads + 1)),
+            interner,
+            num_threads,
+        }
+    }
+
+    fn thread(&self, f: impl FnOnce(&Barrier, &Barrier, &mut T) + Send + 'static) -> &Self {
+        let start = self.start.clone();
+        let end = self.end.clone();
+        let mut interner = self.interner.clone();
+        thread::spawn(move || {
+            f(&*start, &*end, &mut interner);
+        });
+        self
+    }
+
+    fn run(&self) -> Duration {
+        self.start.wait();
+        let t0 = Instant::now();
+        self.end.wait();
+        let time = t0.elapsed();
+        time
+    }
 }
 
-fn task_create_and_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
-    let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    let tempInterner = interner.clone();
-    (0..ITER).into_par_iter().for_each_with(tempInterner, |map, i: u32| {
-        map.intern_ref(&i, || values.get(i as usize).unwrap());
-    });
-    interner
-}
-
-fn create_and_intern_u32refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/create_and_intern_u32refs");
-    group.throughput(Throughput::Elements(ITER as u64));
+fn intern_same_u32refs_in_all_threads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/intern_same_u32refs_in_all_threads");
     let max = num_cpus::get();
     let values: Vec<u32> = (0..ITER).collect();
+    let values: &'static [u32] = values.leak();
 
     for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
+        group.throughput(Throughput::Elements((ITER * threads as u32) as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(threads),
             &threads,
             |bencher, &threads| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-                pool.install(|| bencher.iter(|| task_create_and_intern_u32refs(values.as_slice())));
+                bencher.iter_custom(|iters| {
+                    let mut total = Duration::from_secs(0);
+                    for _ in 0..iters {
+                        let new_interner = Interner::with_capacity_and_hasher(
+                            ITER as usize,
+                            FxBuildHasher::default(),
+                        );
+                        let bench = MultithreadedBench::new(new_interner, threads);
+                        for _ in 0..threads {
+                            bench.thread(move |start, end, interner| {
+                                start.wait();
+                                for i in 0..ITER {
+                                    interner.intern_ref(&i, || values.get(i as usize).unwrap());
+                                }
+                                end.wait();
+                            });
+                        }
+                        total += bench.run();
+                    }
+                    total
+                })
             },
         );
     }
@@ -48,76 +88,134 @@ fn create_and_intern_u32refs(c: &mut Criterion) {
     group.finish();
 }
 
-fn task_get_interned_u32refs(interner: Interner<&'_ u32>) {
-    (0..ITER).into_par_iter().for_each_with(interner, |map, i: u32| {
-        map.intern_ref(&i, || unimplemented!());
-    });
+fn intern_same_u32refs_in_all_threads_with_resize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/intern_same_u32refs_in_all_threads_with_resize");
+    let max = num_cpus::get();
+    let values: Vec<u32> = (0..ITER).collect();
+    let values: &'static [u32] = values.leak();
+
+    for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
+        group.throughput(Throughput::Elements((ITER * threads as u32) as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |bencher, &threads| {
+                bencher.iter_custom(|iters| {
+                    let mut total = Duration::from_secs(0);
+                    for _ in 0..iters {
+                        let new_interner =
+                            Interner::with_capacity_and_hasher(0, FxBuildHasher::default());
+                        let bench = MultithreadedBench::new(new_interner, threads);
+                        for _ in 0..threads {
+                            bench.thread(move |start, end, interner| {
+                                start.wait();
+                                for i in 0..ITER {
+                                    interner.intern_ref(&i, || values.get(i as usize).unwrap());
+                                }
+                                end.wait();
+                            });
+                        }
+                        total += bench.run();
+                    }
+                    total
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn intern_diffrent_u32refs_in_all_threads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Interner/intern_diffrent_u32refs_in_all_threads");
+    let max = num_cpus::get();
+    let values: Vec<u32> = (0..ITER).collect();
+    let values: &'static [u32] = values.leak();
+
+    for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
+        let chunk_size = ITER / threads as u32;
+        group.throughput(Throughput::Elements((chunk_size * threads as u32) as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |bencher, &threads| {
+                bencher.iter_custom(|iters| {
+                    let mut total = Duration::from_secs(0);
+                    for _ in 0..iters {
+                        let new_interner = Interner::with_capacity_and_hasher(
+                            ITER as usize,
+                            FxBuildHasher::default(),
+                        );
+                        let bench = MultithreadedBench::new(new_interner, threads);
+                        let mut chunks = values.chunks_exact(chunk_size as usize);
+                        for _ in 0..threads {
+                            let my_values = chunks.next().unwrap();
+                            bench.thread(move |start, end, interner| {
+                                start.wait();
+                                for &i in my_values {
+                                    interner.intern_ref(&i, || values.get(i as usize).unwrap());
+                                }
+                                end.wait();
+                            });
+                        }
+                        total += bench.run();
+                    }
+                    total
+                })
+            },
+        );
+    }
+
+    group.finish();
 }
 
 fn get_already_interned_u32refs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/get_already_interned_u32refs");
-    group.throughput(Throughput::Elements(ITER as u64));
     let max = num_cpus::get();
     let values: Vec<u32> = (0..ITER).collect();
+    let values: &'static [u32] = values.leak();
+    let mut new_interner =
+        Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    for i in 0..ITER {
+        new_interner.intern_ref(&i, || values.get(i as usize).unwrap());
+    }
 
     for threads in (1..=max).filter(|thread| *thread == 1 || *thread % 4 == 0) {
+        let temp_interner = new_interner.clone();
+        group.throughput(Throughput::Elements((ITER * threads as u32) as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(threads),
             &threads,
             |bencher, &threads| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-                pool.install(|| {
-                    let interner = task_create_and_intern_u32refs(values.as_slice());
-                    bencher.iter(|| task_get_interned_u32refs(interner.clone()))
-                });
+                bencher.iter_custom(|iters| {
+                    let mut total = Duration::from_secs(0);
+                    for _ in 0..iters {
+                        let bench = MultithreadedBench::new(temp_interner.clone(), threads);
+                        for _ in 0..threads {
+                            bench.thread(move |start, end, interner| {
+                                start.wait();
+                                for i in 0..ITER {
+                                    interner.intern_ref(&i, || unimplemented!());
+                                }
+                                end.wait();
+                            });
+                        }
+                        total += bench.run();
+                    }
+                    total
+                })
             },
         );
     }
 
-    group.finish();
-}
-
-fn single_task_intern_u32refs(values: &[u32]) -> Interner<&'_ u32> {
-    let mut map = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
-    (0..ITER).for_each(|i: u32| {
-        map.intern_ref(&i, || values.get(i as usize).unwrap());
-    });
-    map
-}
-
-fn single_intern_u32refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/single_thread_intern_u32refs");
-    group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u32> = (0..ITER).collect();
-    group.bench_function("1", |bencher| {
-        bencher.iter(|| single_task_intern_u32refs(values.as_slice()))
-    });
-    group.finish();
-}
-
-fn single_task_get_interned_u32refs(interner: &mut Interner<&'_ u32>) {
-    (0..ITER).for_each(|i: u32| {
-        interner.intern_ref(&i, || unimplemented!());
-    });
-}
-
-fn single_get_already_interned_u32refs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Interner/single_thread_get_already_interned_u32refs");
-    group.throughput(Throughput::Elements(ITER as u64));
-    let values: Vec<u32> = (0..ITER).collect();
-    let mut interner = task_create_and_intern_u32refs(values.as_slice());
-    group.bench_function("1", |bencher| {
-        bencher.iter(|| single_task_get_interned_u32refs(&mut interner))
-    });
     group.finish();
 }
 
 criterion_group!(
     benches,
-    single_intern_u32refs,
-    single_get_already_interned_u32refs,
-    create_and_drop,
     get_already_interned_u32refs,
-    create_and_intern_u32refs
+    intern_same_u32refs_in_all_threads,
+    intern_diffrent_u32refs_in_all_threads,
+    intern_same_u32refs_in_all_threads_with_resize,
 );
 criterion_main!(benches);
