@@ -135,12 +135,12 @@ impl<T> Bucket<T> {
         count_locked_slots(valid_bits, group_meta_data)
     }
 }
-struct LockedData {
+pub(crate) struct LockedData {
     pos: usize,
     index: usize,
     group_meta_data: u64,
 }
-enum LockResult<T> {
+pub(crate) enum LockResult<T> {
     ResizeNeeded,
     Moved,
     Locked(LockedData),
@@ -148,7 +148,7 @@ enum LockResult<T> {
 }
 
 #[inline]
-fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
+pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
     let mut state = hash_builder.build_hasher();
     val.hash(&mut state);
     state.finish()
@@ -177,11 +177,12 @@ pub(crate) struct RawInterner<T> {
 
 impl<T> Drop for RawInterner<T> {
     fn drop(&mut self) {
-        if self.bucket_mask != 0 {
+        if !self.buckets.is_null() {
             let layout = Layout::array::<Bucket<T>>(self.bucket_mask + 1)
                 .expect("Interner capacity overflow");
             let ptr = self.buckets as *mut u8;
             unsafe { dealloc(ptr, layout) };
+            self.buckets = std::ptr::null_mut();
         }
     }
 }
@@ -254,11 +255,14 @@ where
 
     /// Searches for an element in the table and if not found lockes a slot to be able to add the element
     #[inline]
-    fn lock_or_get_slot<Q>(&mut self, hash: u64, value: &Q) -> LockResult<T>
+    pub(crate) fn lock_or_get_slot<Q>(&mut self, hash: u64, value: &Q) -> LockResult<T>
     where
         T: Borrow<Q>,
         Q: Sync + Send + Eq,
     {
+        if self.to_be_moved.load( Ordering::Acquire) == 0{
+            return LockResult::Moved;
+        }
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
@@ -348,56 +352,10 @@ impl<T> RawInterner<T>
 where
     T: Sync + Send + Copy + Hash,
 {
-    #[inline]
-    pub fn intern_ref<Q: Sized>(
-        &mut self,
-        hash_builder: &impl BuildHasher,
-        value: &Q,
-        make: impl FnOnce() -> T,
-    ) -> (T, Option<Arc<UnsafeCell<RawInterner<T>>>>)
-    where
-        T: Sync + Send + Borrow<Q> + Copy,
-        Q: Sync + Send + Hash + Eq,
-    {
-        let hash = make_hash(hash_builder, value);
-        let mut raw_interner = self;
-        let mut prev_to_move = None;
-        loop {
-            match raw_interner.lock_or_get_slot(hash, value) {
-                LockResult::Found(result) => {
-                    if let Some(next_raw_interner) = prev_to_move {
-                        return (result, next_raw_interner);
-                    }
-                    return (result, None);
-                }
-                LockResult::Locked(locked_data) => {
-                    let result = make();
-                    raw_interner.unlock_and_set_value(hash, result, locked_data, hash_builder);
-                    if let Some(next_raw_interner) = prev_to_move {
-                        return (result, next_raw_interner);
-                    }
-                    return (result, None);
-                }
-                LockResult::ResizeNeeded => {
-                    if 0 == raw_interner.to_be_moved.load(Ordering::Acquire) {
-                        prev_to_move = Some(raw_interner.next_raw_interner.clone());
-                    }
-                    raw_interner = raw_interner.create_and_stor_next_raw_interner(hash_builder);
-                }
-                LockResult::Moved => {
-                    if 0 == raw_interner.to_be_moved.load(Ordering::Acquire) {
-                        prev_to_move = Some(raw_interner.next_raw_interner.clone());
-                    }
-                    raw_interner = raw_interner.get_next_raw_interner();
-                }
-            }
-        }
-    }
-
     // unlock the slot by marking the element as valid unparks all threads blocked on this slot
     // and if the bucket is moved transer the value to the new interner also.
     #[inline]
-    fn unlock_and_set_value(
+    pub(crate) fn unlock_and_set_value(
         &mut self,
         hash: u64,
         value: T,
@@ -418,11 +376,14 @@ where
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn get_next_raw_interner(&self) -> &mut Self {
+    pub(crate) fn get_next_raw_interner(&self) -> &mut Self {
         unsafe { &mut *self.next_raw_interner.as_ref().unwrap().get() }
     }
 
-    fn create_and_stor_next_raw_interner(&mut self, hash_builder: &impl BuildHasher) -> &mut Self {
+    pub(crate) fn create_and_stor_next_raw_interner(
+        &mut self,
+        hash_builder: &impl BuildHasher,
+    ) -> &mut Self {
         let new_number_of_buckets = (self.bucket_mask + 1) * 2;
         let mut created = false;
         let new_raw_interner = &mut self.next_raw_interner;
