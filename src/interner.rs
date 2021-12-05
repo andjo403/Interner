@@ -289,8 +289,7 @@ mod tests {
         let values = values.into_boxed_slice();
 
         let hashbuilder = FxBuildHasher::default();
-        let interner =
-            Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+        let interner = Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
         (1..ITER).into_iter().for_each(|i: u64| {
             interner.intern_ref(&i, || values.get(i as usize).unwrap());
             interner.intern_ref(&i, || {
@@ -311,14 +310,14 @@ mod tests {
 
         let interner: Arc<Interner<&u64, FxBuildHasher>> =
             Arc::new(Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default()));
-        (1..ITER).into_par_iter().for_each(| i: u64| {
+        (1..ITER).into_par_iter().for_each(|i: u64| {
             interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
             let result = interner.intern_ref(&i, || unimplemented!());
             assert_eq!(i, *result);
         });
 
         (1..ITER).into_iter().for_each(|i: u64| {
-            let result = interner.intern_ref(&i, || unimplemented!());
+            let result = interner.intern_ref(&i, || panic!("value {}", i));
             assert_eq!(i, *result);
         });
     }
@@ -349,8 +348,8 @@ mod tests {
         let values: Arc<Vec<u64>> = Arc::new((0..ITER).collect());
 
         let interner: Arc<Interner<&u64, FxBuildHasher>> =
-        Arc::new(Interner::with_hasher(FxBuildHasher::default()));
-        (1..ITER).into_par_iter().for_each(| i: u64| {
+            Arc::new(Interner::with_hasher(FxBuildHasher::default()));
+        (1..ITER).into_par_iter().for_each(|i: u64| {
             interner.intern_ref(&i, || (*values).get(i as usize).unwrap());
             let result = interner.intern_ref(&i, || unimplemented!());
             assert_eq!(i, *result);

@@ -7,18 +7,18 @@ use packed_simd::u8x8;
 /// This implementation uses 128-bit SSE instructions.
 #[cfg(not(feature = "no-simd"))]
 #[inline]
-pub(crate) fn match_byte(valid_bits: u64, hashes: u64, value: u8) -> BitMaskIter {
-    let hashes = u8x8::from_slice_aligned(&hashes.to_ne_bytes());
+pub(crate) fn match_byte(valid_bits: u8, hashes: u64, value: u8) -> BitMaskIter {
+    let hashes: u8x8 = hashes.to_ne_bytes().into();
     let values = u8x8::splat(value);
-    BitMaskIter::new(hashes.eq(values).bitmask() as u64 & valid_bits)
+    BitMaskIter::new(hashes.eq(values).bitmask() as u8 & valid_bits)
 }
 
 #[cfg(not(feature = "no-simd"))]
-pub(crate) fn count_locked_slots(valid_bits: u64, hashes: u64) -> isize {
-    let hashes = u8x8::from_slice_aligned(&hashes.to_ne_bytes());
-    let values = u8x8::from_slice_aligned(&0x0u64.to_ne_bytes());
+pub(crate) fn count_locked_slots(valid_bits: u8, hashes: u64) -> isize {
+    let hashes: u8x8 = hashes.to_ne_bytes().into();
+    let values = 0x0u64.to_ne_bytes().into();
 
-    (hashes.ne(values).bitmask() as u64 & valid_bits).count_ones() as isize
+    (hashes.ne(values).bitmask() as u8 & valid_bits).count_ones() as isize
 }
 
 #[cfg(feature = "no-simd")]
@@ -53,7 +53,7 @@ pub(crate) fn count_locked_slots(valid_bits: u64, hashes: u64) -> isize {
 mod tests {
     use super::*;
 
-    fn valid_bit(index: usize) -> u64 {
+    fn valid_bit(index: usize) -> u8 {
         1 << index
     }
     fn h2_bits(h2: u64, index: usize) -> u64 {

@@ -19,7 +19,7 @@ struct MultithreadedBench<T> {
     num_threads: usize,
 }
 
-impl<T: Send + Clone + 'static> MultithreadedBench<T> {
+impl<T: Send + Sync + Clone + 'static> MultithreadedBench<T> {
     fn new(interner: T, num_threads: usize) -> Self {
         Self {
             start: Arc::new(Barrier::new(num_threads + 1)),
@@ -29,7 +29,7 @@ impl<T: Send + Clone + 'static> MultithreadedBench<T> {
         }
     }
 
-    fn thread(&self, f: impl FnOnce(&Barrier, &Barrier, &mut T) + Send + 'static) -> &Self {
+    fn thread(&self, f: impl FnOnce(&Barrier, &Barrier, &T) + Send + 'static) -> &Self {
         let start = self.start.clone();
         let end = self.end.clone();
         let mut interner = self.interner.clone();
@@ -63,10 +63,10 @@ fn intern_same_u32refs_in_all_threads(c: &mut Criterion) {
                 bencher.iter_custom(|iters| {
                     let mut total = Duration::from_secs(0);
                     for _ in 0..iters {
-                        let new_interner = Interner::with_capacity_and_hasher(
+                        let new_interner = Arc::new(Interner::with_capacity_and_hasher(
                             ITER as usize,
                             FxBuildHasher::default(),
-                        );
+                        ));
                         let bench = MultithreadedBench::new(new_interner, threads);
                         for _ in 0..threads {
                             bench.thread(move |start, end, interner| {
@@ -103,8 +103,10 @@ fn intern_same_u32refs_in_all_threads_with_resize(c: &mut Criterion) {
                 bencher.iter_custom(|iters| {
                     let mut total = Duration::from_secs(0);
                     for _ in 0..iters {
-                        let new_interner =
-                            Interner::with_capacity_and_hasher(0, FxBuildHasher::default());
+                        let new_interner = Arc::new(Interner::with_capacity_and_hasher(
+                            0,
+                            FxBuildHasher::default(),
+                        ));
                         let bench = MultithreadedBench::new(new_interner, threads);
                         for _ in 0..threads {
                             bench.thread(move |start, end, interner| {
@@ -142,10 +144,10 @@ fn intern_diffrent_u32refs_in_all_threads(c: &mut Criterion) {
                 bencher.iter_custom(|iters| {
                     let mut total = Duration::from_secs(0);
                     for _ in 0..iters {
-                        let new_interner = Interner::with_capacity_and_hasher(
+                        let new_interner = Arc::new(Interner::with_capacity_and_hasher(
                             ITER as usize,
                             FxBuildHasher::default(),
-                        );
+                        ));
                         let bench = MultithreadedBench::new(new_interner, threads);
                         let mut chunks = values.chunks_exact(chunk_size as usize);
                         for _ in 0..threads {
@@ -174,8 +176,8 @@ fn get_already_interned_u32refs(c: &mut Criterion) {
     let max = num_cpus::get();
     let values: Vec<u32> = (0..ITER).collect();
     let values: &'static [u32] = values.leak();
-    let mut new_interner =
-        Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default());
+    let new_interner =
+        Arc::new(Interner::with_capacity_and_hasher(ITER as usize, FxBuildHasher::default()));
     for i in 0..ITER {
         new_interner.intern_ref(&i, || values.get(i as usize).unwrap());
     }

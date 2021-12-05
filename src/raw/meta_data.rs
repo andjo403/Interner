@@ -78,8 +78,8 @@ pub(crate) fn bucket_full(group_meta_data: u64) -> bool {
 }
 
 #[inline]
-pub(crate) fn get_valid_bits(group_meta_data: u64) -> u64 {
-    (group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)
+pub(crate) fn get_valid_bits(group_meta_data: u64) -> u8 {
+    ((group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)) as u8
 }
 
 impl MetaData {
