@@ -1,7 +1,7 @@
 use crate::raw::{make_hash, LockResult, RawInterner};
 use core::hash::{BuildHasher, Hash};
 use core::sync::atomic::{AtomicPtr, Ordering};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, BorrowMut};
 use std::collections::hash_map::RandomState;
 
 /// Default hasher for `HashMap`.
@@ -10,7 +10,7 @@ pub type DefaultHashBuilder = RandomState;
 /// A concurrent interner implemented with quadratic probing and SIMD lookup.
 pub struct Interner<T, S = DefaultHashBuilder> {
     hash_builder: S,
-    raw_interners: RawInterner<T>,
+    _raw_interners: Box<RawInterner<T>>,
     current_raw_interner: AtomicPtr<RawInterner<T>>,
 }
 
@@ -101,13 +101,9 @@ where
     /// ```
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
-        let mut result = Self {
-            hash_builder,
-            raw_interners: RawInterner::with_capacity(capacity),
-            current_raw_interner: AtomicPtr::default(),
-        };
-        result.current_raw_interner = AtomicPtr::new(&mut result.raw_interners);
-        result
+        let mut raw_interner = Box::new(RawInterner::with_capacity(capacity));
+        let current_raw_interner = AtomicPtr::new(raw_interner.borrow_mut());
+        Self { hash_builder, _raw_interners: raw_interner, current_raw_interner }
     }
 
     /// Returns a reference to the map's [`BuildHasher`].

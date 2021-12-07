@@ -1,13 +1,13 @@
 use core::hash::{BuildHasher, Hash, Hasher};
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicIsize, Ordering};
-use parking_lot::Once;
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::Once;
 
 mod bitmask;
 use bitmask::BitMaskIter;
@@ -129,7 +129,7 @@ impl<T> Bucket<T> {
         for index in iter {
             let value = self.get_ref_to_slot(index);
             let hash = hasher(value);
-            let h2 = h2(hash) as u64;
+            let h2 = h2(hash);
             new_raw_interner.transfer_value_to_newer_interner(h2, hash, *value, hash_builder);
         }
         count_locked_slots(valid_bits, group_meta_data)
@@ -260,7 +260,7 @@ where
         T: Borrow<Q>,
         Q: Sync + Send + Eq,
     {
-        if self.to_be_moved.load( Ordering::Acquire) == 0{
+        if self.to_be_moved.load(Ordering::Acquire) == 0 {
             return LockResult::Moved;
         }
         let h2 = h2(hash);
@@ -287,7 +287,7 @@ where
             let iter = BitMaskIter::new((!valid_bits) & 0x7F);
             let mut group_meta_data = group_meta_data;
             for index in iter {
-                match bucket.meta_data.reserve(&mut group_meta_data, h2 as u64, index, true) {
+                match bucket.meta_data.reserve(&mut group_meta_data, h2, index, true) {
                     ReserveResult::Reserved => {
                         return LockResult::Locked(LockedData { pos, index, group_meta_data });
                     }
@@ -313,7 +313,7 @@ where
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
     // this function is used for resize and the value is then in the previous instance of 'RawInterner'.
-    fn lock_slot_for_transfer(&mut self, h2: u64, hash: u64) -> LockResult<T> {
+    fn lock_slot_for_transfer(&mut self, h2: u8, hash: u64) -> LockResult<T> {
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
             let bucket = unsafe { &mut *self.buckets.add(pos) };
@@ -368,7 +368,7 @@ where
         // SAFTY: as the index is caped
         unsafe { bucket.set_slot(index, value) };
 
-        let h2 = h2(hash) as u64;
+        let h2 = h2(hash);
         if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2, index) {
             self.transfer_value_to_newer_interner(h2, hash, value, hash_builder);
             self.to_be_moved.fetch_sub(1, Ordering::Release);
@@ -413,7 +413,7 @@ where
     // this function is used for resize and the value is then in the previous instance of 'RawInterner'.
     fn transfer_value_to_newer_interner(
         &mut self,
-        h2: u64,
+        h2: u8,
         hash: u64,
         value: T,
         hash_builder: &impl BuildHasher,

@@ -1,7 +1,6 @@
 #![feature(hash_raw_entry)]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fxhash::{FxBuildHasher, FxHasher};
-use parking_lot::Mutex as Lock;
 use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::collections::hash_map::RawEntryMut;
@@ -9,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::{
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, Mutex as Lock},
     thread,
     time::{Duration, Instant},
 };
@@ -84,7 +83,7 @@ impl<T: Eq + Hash + Copy> Interner<T> {
         Q: Hash + Eq,
     {
         let hash = make_hash(value);
-        let mut shard = self.get_shard_by_hash(hash).lock();
+        let mut shard = self.get_shard_by_hash(hash).lock().unwrap();
         let entry = shard.raw_entry_mut().from_key_hashed_nocheck(hash, value);
 
         match entry {

@@ -1,11 +1,12 @@
-use core::sync::atomic::{fence, AtomicU64, Ordering};
-use parking_lot_core::{self, SpinWait, UnparkToken, DEFAULT_PARK_TOKEN};
-
-// UnparkToken used to indicate that reference is stored. not used only to have a value to set in unpark_all
-const TOKEN_VALUE_SET: UnparkToken = UnparkToken(0);
+use std::lazy::SyncLazy;
+use std::mem::{self, MaybeUninit};
+use std::sync::{
+    atomic::{fence, AtomicU64, Ordering},
+    Condvar, Mutex,
+};
 
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
-const LOCKED_BIT: u64 = 0b1;
+const LOCKED_BIT: u8 = 0x01;
 
 const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
 const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
@@ -38,6 +39,27 @@ pub(crate) struct MetaData {
     meta_data: AtomicU64,
 }
 
+static CONDVARS: SyncLazy<[(Mutex<()>, Condvar); 64]> = SyncLazy::new(|| {
+    // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
+    // safe because the type we are claiming to have initialized here is a
+    // bunch of `MaybeUninit`s, which do not require initialization.
+    let mut condvars: [MaybeUninit<(Mutex<()>, Condvar)>; 64] =
+        unsafe { MaybeUninit::uninit().assume_init() };
+
+    // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
+    // assignment instead of `ptr::write` does not cause the old
+    // uninitialized value to be dropped. Also if there is a panic during
+    // this loop, we have a memory leak, but there is no memory safety
+    // issue.
+    for elem in &mut condvars[..] {
+        elem.write(Default::default());
+    }
+
+    // Everything is initialized. Transmute the array to the
+    // initialized type.
+    unsafe { mem::transmute::<_, [(Mutex<()>, Condvar); 64]>(condvars) }
+});
+
 #[inline]
 fn valid_bit(index: usize) -> u64 {
     1 << (64 - 8 + index)
@@ -47,8 +69,13 @@ fn test_valid_bit(group_meta_data: u64, index: usize) -> bool {
     group_meta_data & valid_bit(index) != 0
 }
 #[inline]
-fn h2_bits(h2: u64, index: usize) -> u64 {
-    h2 << (8 * index)
+fn h2_bits(h2: u8, index: usize) -> u64 {
+    (h2 as u64) << (8 * index)
+}
+
+#[inline]
+fn h2_from_meta(group_meta_data: u64, index: usize) -> u8 {
+    ((group_meta_data >> ((8 * index) + 2)) & 0x3f) as u8
 }
 
 #[inline]
@@ -87,7 +114,7 @@ impl MetaData {
     pub(crate) fn reserve(
         &self,
         group_meta_data: &mut u64,
-        h2: u64,
+        h2: u8,
         index: usize,
         value_possibly_in_bucket: bool,
     ) -> ReserveResult {
@@ -101,9 +128,8 @@ impl MetaData {
                     fence(Ordering::Acquire);
                     return ReserveResult::Occupied;
                 }
-                let h2bits = h2_bits(h2 as u64 & 0xFC, index);
-                if h2bits & *group_meta_data == h2bits {
-                    return self.wait_on_lock_release(group_meta_data, index);
+                if h2_from_meta(*group_meta_data, index) == (h2 >> 2) {
+                    return self.wait_on_lock_release(group_meta_data, index, h2);
                 }
                 return ReserveResult::AlreadyReservedWithOtherH2;
             }
@@ -130,20 +156,13 @@ impl MetaData {
     }
 
     #[cold]
-    fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize) -> ReserveResult {
+    fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize, h2: u8) -> ReserveResult {
         let mut group_meta_data = self.meta_data.load(Ordering::Relaxed);
-        let mut spinwait = SpinWait::new();
         loop {
             if test_valid_bit(group_meta_data, index) {
                 *out_meta_data = group_meta_data;
                 fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
-            }
-
-            // If there is no queue, try spinning a few times
-            if !test_park_bit(group_meta_data, index) && spinwait.spin() {
-                group_meta_data = self.meta_data.load(Ordering::Relaxed);
-                continue;
             }
 
             // Set the parked bit
@@ -158,28 +177,11 @@ impl MetaData {
                     continue;
                 }
             }
-
-            // Park our thread until we are woken up by an unlock
-            let addr = self as *const _ as usize + index;
-            let validate = || self.meta_data.load(Ordering::Relaxed) == group_meta_data;
-            let before_sleep = || {};
-            let timed_out = |_, _| unreachable!();
-            // SAFETY:
-            //   * `addr` is an address we control.
-            //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
-            //   * `before_sleep` does not call `park`, nor does it panic.
-            unsafe {
-                parking_lot_core::park(
-                    addr,
-                    validate,
-                    before_sleep,
-                    timed_out,
-                    DEFAULT_PARK_TOKEN,
-                    None,
-                );
-            }
+            let h2 = (h2 >> 2) as usize;
+            let (lock, condvar) = &CONDVARS[h2];
+            let guard = lock.lock().unwrap();
+            drop(condvar.wait(guard).unwrap());
             // Loop back and check if the valid bit was set
-            spinwait.reset();
             group_meta_data = self.meta_data.load(Ordering::Relaxed);
         }
     }
@@ -187,12 +189,13 @@ impl MetaData {
     pub(crate) fn set_valid_and_unpark(
         &self,
         mut group_meta_data: u64,
-        h2: u64,
+        h2: u8,
         index: usize,
     ) -> bool {
         let mut moved = false;
         let mut park_bit = false;
         loop {
+            assert_eq!(h2 >> 2, h2_from_meta(group_meta_data, index));
             if bucket_moved(group_meta_data) {
                 moved = true;
             }
@@ -217,19 +220,17 @@ impl MetaData {
             }
         }
         if park_bit {
-            self.unpark_all(index);
+            self.unpark_all(h2);
         }
         moved
     }
 
     #[cold]
-    fn unpark_all(&self, index: usize) {
-        let addr = self as *const _ as usize + index;
-        // SAFETY:
-        //   * `addr` is an address we control.
-        unsafe {
-            parking_lot_core::unpark_all(addr, TOKEN_VALUE_SET);
-        }
+    fn unpark_all(&self, h2: u8) {
+        let h2 = (h2 >> 2) as usize;
+        let (lock, condvar) = &CONDVARS[h2];
+        let _guard = lock.lock().unwrap();
+        condvar.notify_all();
     }
 
     #[inline]
@@ -314,6 +315,6 @@ fn set_valid() {
     let meta_data =
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
-    meta_data.set_valid_and_unpark(group_meta_data, 0xA8, 1);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_A8AB);
+    meta_data.set_valid_and_unpark(group_meta_data, 0xAC, 1);
+    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_ACAB);
 }
