@@ -1,8 +1,8 @@
 use crate::raw::{make_hash, LockResult, RawInterner};
-use core::hash::{BuildHasher, Hash};
-use core::sync::atomic::{AtomicPtr, Ordering};
+use crate::sync::{AtomicPtr, Ordering};
 use std::borrow::{Borrow, BorrowMut};
 use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 
 /// Default hasher for `HashMap`.
 pub type DefaultHashBuilder = RandomState;

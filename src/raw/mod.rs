@@ -1,12 +1,11 @@
-use core::hash::{BuildHasher, Hash, Hasher};
-use core::marker::PhantomData;
-use core::sync::atomic::{AtomicIsize, Ordering};
+use crate::sync::{Arc, AtomicIsize, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::Once;
 
 mod bitmask;

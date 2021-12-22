@@ -1,9 +1,6 @@
+use crate::sync::{fence, AtomicU64, Condvar, Mutex, Ordering};
 use std::lazy::SyncLazy;
 use std::mem::{self, MaybeUninit};
-use std::sync::{
-    atomic::{fence, AtomicU64, Ordering},
-    Condvar, Mutex,
-};
 
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
 const LOCKED_BIT: u8 = 0x01;
@@ -192,16 +189,7 @@ impl MetaData {
         h2: u8,
         index: usize,
     ) -> bool {
-        let mut moved = false;
-        let mut park_bit = false;
         loop {
-            assert_eq!(h2 >> 2, h2_from_meta(group_meta_data, index));
-            if bucket_moved(group_meta_data) {
-                moved = true;
-            }
-            if test_park_bit(group_meta_data, index) {
-                park_bit = true;
-            }
             let new_group_meta_data =
                 (group_meta_data & !h2_bits(0xff, index)) | valid_bit(index) | h2_bits(h2, index);
             match self.meta_data.compare_exchange_weak(
@@ -211,18 +199,16 @@ impl MetaData {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    break;
+                    if test_park_bit(group_meta_data, index) {
+                        self.unpark_all(h2);
+                    }
+                    return bucket_moved(group_meta_data);
                 }
                 Err(new_meta_data) => {
                     group_meta_data = new_meta_data;
-                    continue;
                 }
             }
         }
-        if park_bit {
-            self.unpark_all(h2);
-        }
-        moved
     }
 
     #[cold]

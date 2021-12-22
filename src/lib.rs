@@ -10,5 +10,6 @@ mod raw;
 
 /// A interner implemented with quadratic probing and SIMD lookup.
 pub mod interner;
+mod sync;
 
 pub use crate::interner::Interner;
