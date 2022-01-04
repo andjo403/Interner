@@ -1,5 +1,4 @@
 #![warn(missing_docs)]
-#![warn(rust_2018_idioms)]
 #![feature(once_cell)]
 #![feature(hash_raw_entry)]
 

@@ -50,7 +50,6 @@ impl Iterator for ProbeSeq {
 
 /// Primary hash function, used to select the initial bucket to probe from.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 fn h1(hash: u64) -> usize {
     // On 32-bit platforms we simply ignore the higher hash bits.
     hash as usize
@@ -58,7 +57,6 @@ fn h1(hash: u64) -> usize {
 
 /// Secondary hash function, saved in the meta data.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 fn h2(hash: u64) -> u8 {
     // Grab the top 8 bits of the hash. While the hash is normally a full 64-bit
     // value, some hash functions (such as FxHash) produce a usize result
@@ -259,9 +257,6 @@ where
         T: Borrow<Q>,
         Q: Sync + Send + Eq,
     {
-        if self.to_be_moved.load(Ordering::Acquire) == 0 {
-            return LockResult::Moved;
-        }
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
             // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
