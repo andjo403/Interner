@@ -10,6 +10,7 @@ const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReserveResult {
     AlreadyReservedWithOtherH2,
+    AlreadyReservedWithSameH2,
     Reserved,
     Occupied,
     SlotAvailableButGroupMoved,
@@ -108,25 +109,14 @@ pub(crate) fn get_valid_bits(group_meta_data: u64) -> u8 {
 
 impl MetaData {
     #[inline]
-    pub(crate) fn reserve(
-        &self,
-        group_meta_data: &mut u64,
-        h2: u8,
-        index: usize,
-        value_possibly_in_bucket: bool,
-    ) -> ReserveResult {
+    pub(crate) fn reserve(&self, group_meta_data: &mut u64, h2: u8, index: usize) -> ReserveResult {
         loop {
             if test_valid_bit(*group_meta_data, index) {
-                fence(Ordering::Acquire);
                 return ReserveResult::Occupied;
             }
             if test_lock_bit(*group_meta_data, index) {
-                if !value_possibly_in_bucket {
-                    fence(Ordering::Acquire);
-                    return ReserveResult::Occupied;
-                }
                 if h2_from_meta(*group_meta_data, index) == (h2 >> 2) {
-                    return self.wait_on_lock_release(group_meta_data, index, h2);
+                    return ReserveResult::AlreadyReservedWithSameH2;
                 }
                 return ReserveResult::AlreadyReservedWithOtherH2;
             }
@@ -138,7 +128,7 @@ impl MetaData {
                 *group_meta_data,
                 new_group_meta_data,
                 Ordering::Acquire,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
                     *group_meta_data = new_group_meta_data;
@@ -153,13 +143,13 @@ impl MetaData {
     }
 
     #[cold]
-    fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize, h2: u8) -> ReserveResult {
+    pub(crate) fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize, h2: u8) {
         let mut group_meta_data = self.meta_data.load(Ordering::Relaxed);
         loop {
             if test_valid_bit(group_meta_data, index) {
                 *out_meta_data = group_meta_data;
                 fence(Ordering::Acquire);
-                return ReserveResult::Occupied;
+                return;
             }
 
             // Set the parked bit
@@ -235,7 +225,7 @@ impl MetaData {
 fn reserve_reserved() {
     let meta_data = MetaData { meta_data: AtomicU64::new(0) };
     let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
     assert_eq!(meta_data.get_metadata_acquire(), 0xFD);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0xFD);
@@ -245,7 +235,7 @@ fn reserve_reserved() {
 fn reserve_reserved_index1() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xA8, 0)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xA8, 0);
-    let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1);
     assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_FDA8);
     assert_eq!(result, ReserveResult::Reserved);
     assert_eq!(group_meta_data, 0x100_0000_0000_FDA8);
@@ -255,7 +245,7 @@ fn reserve_reserved_index1() {
 fn reserve_occupied() {
     let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
     let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
     assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_00AB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
@@ -269,7 +259,7 @@ fn reserve_occupied_index1() {
         ),
     };
     let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
     assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_AAAB);
     assert_eq!(result, ReserveResult::Occupied);
     assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
@@ -279,7 +269,7 @@ fn reserve_occupied_index1() {
 fn reserve_already_reserved_with_other_h2() {
     let meta_data = MetaData { meta_data: AtomicU64::new(h2_bits(0xAD, 0)) };
     let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
     assert_eq!(meta_data.get_metadata_acquire(), 0xAD);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0xAD);
@@ -290,7 +280,7 @@ fn reserve_already_reserved_with_other_h2_index1() {
     let meta_data =
         MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
     let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1, true);
+    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
     assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_ADAB);
     assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
     assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
