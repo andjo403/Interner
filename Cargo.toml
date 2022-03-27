@@ -9,7 +9,7 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-packed_simd = { version = "0.3.4", package = "packed_simd_2" }
+
 
 [profile.release]
 debug = 2
@@ -25,7 +25,6 @@ smallvec = { version = "1.0", features = ["union", "may_dangle"] }
 loom = { version = "0.5", features = ["checkpoint"]}
 
 [features]
-no-simd = []
 
 [[bench]]
 name = "interner_bench"

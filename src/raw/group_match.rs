@@ -1,53 +1,20 @@
 use super::bitmask::BitMaskIter;
-#[cfg(not(feature = "no-simd"))]
-use packed_simd::u8x8;
+use std::simd::{u8x8, ToBitMask};
 
 /// Returns a `BitMask` indicating all hash bytes in the group which have
 /// the given value.
-///
-/// This implementation uses 128-bit SSE instructions.
-#[cfg(not(feature = "no-simd"))]
 #[inline]
 pub(crate) fn match_byte(valid_bits: u8, hashes: u64, value: u8) -> BitMaskIter {
-    let hashes: u8x8 = hashes.to_ne_bytes().into();
+    let hashes = u8x8::from_slice(&hashes.to_ne_bytes());
     let values = u8x8::splat(value);
-    BitMaskIter::new(hashes.eq(values).bitmask() as u8 & valid_bits)
+    BitMaskIter::new(hashes.lanes_eq(values).to_bitmask() & valid_bits)
 }
 
-#[cfg(not(feature = "no-simd"))]
 pub(crate) fn count_locked_slots(valid_bits: u8, hashes: u64) -> isize {
-    let hashes: u8x8 = hashes.to_ne_bytes().into();
-    let values = 0x0u64.to_ne_bytes().into();
+    let hashes = u8x8::from_slice(&hashes.to_ne_bytes());
+    let values = u8x8::from_slice(&0x0u64.to_ne_bytes());
 
-    (hashes.ne(values).bitmask() as u8 & valid_bits).count_ones() as isize
-}
-
-#[cfg(feature = "no-simd")]
-#[inline]
-pub(crate) fn match_byte(valid_bits: u8, hashes: u64, value: u8) -> BitMaskIter {
-    let hashes = hashes.to_ne_bytes();
-    let mut result: u8 = 0;
-    let iter = BitMaskIter::new(valid_bits);
-    for i in iter {
-        if hashes[i] == value {
-            result |= 1 << i;
-        }
-    }
-    BitMaskIter::new(result & valid_bits)
-}
-
-#[cfg(feature = "no-simd")]
-pub(crate) fn count_locked_slots(valid_bits: u8, hashes: u64) -> isize {
-    let hashes = hashes.to_ne_bytes();
-    let mut possibly_locked: u8 = 0;
-    let iter = BitMaskIter::new(valid_bits);
-    for i in iter {
-        if hashes[i] != 0 {
-            possibly_locked |= 1 << i;
-        }
-    }
-
-    (possibly_locked & valid_bits).count_ones() as isize
+    (hashes.lanes_ne(values).to_bitmask() & !valid_bits & 0x7f).count_ones() as isize
 }
 
 #[cfg(test)]
@@ -94,5 +61,11 @@ mod tests {
         let mut iter = match_byte(valid_bits, hashes, 42);
         assert_eq!(iter.next(), Some(0));
         assert_eq!(iter.next(), None);
+    }
+    #[test]
+    fn count_locked_slots_test() {
+        assert_eq!(2, count_locked_slots(0x3, 0x1200320011));
+        assert_eq!(0, count_locked_slots(0x1f, 0x1200320011));
+        assert_eq!(3, count_locked_slots(0x0, 0x1200320011));
     }
 }
