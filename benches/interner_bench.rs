@@ -50,7 +50,7 @@ impl<T: Send + Sync + Clone + 'static> MultithreadedBench<T> {
 
 fn intern_same_u32refs_in_all_threads(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/intern_same_u32refs_in_all_threads");
-    let max = num_cpus::get();
+    let max = usize::from(thread::available_parallelism().unwrap());
     let values: Vec<u32> = (0..ITER).collect();
     let values: &'static [u32] = values.leak();
 
@@ -90,7 +90,7 @@ fn intern_same_u32refs_in_all_threads(c: &mut Criterion) {
 
 fn intern_same_u32refs_in_all_threads_with_resize(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/intern_same_u32refs_in_all_threads_with_resize");
-    let max = num_cpus::get();
+    let max = usize::from(thread::available_parallelism().unwrap());
     let values: Vec<u32> = (0..ITER).collect();
     let values: &'static [u32] = values.leak();
 
@@ -130,7 +130,7 @@ fn intern_same_u32refs_in_all_threads_with_resize(c: &mut Criterion) {
 
 fn intern_diffrent_u32refs_in_all_threads(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/intern_diffrent_u32refs_in_all_threads");
-    let max = num_cpus::get();
+    let max = usize::from(thread::available_parallelism().unwrap());
     let values: Vec<u32> = (0..ITER).collect();
     let values: &'static [u32] = values.leak();
 
@@ -173,7 +173,7 @@ fn intern_diffrent_u32refs_in_all_threads(c: &mut Criterion) {
 
 fn get_already_interned_u32refs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Interner/get_already_interned_u32refs");
-    let max = num_cpus::get();
+    let max = usize::from(thread::available_parallelism().unwrap());
     let values: Vec<u32> = (0..ITER).collect();
     let values: &'static [u32] = values.leak();
     let new_interner =
