@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
 #![feature(once_cell)]
 #![feature(hash_raw_entry)]
-
 #![feature(portable_simd)]
 
 //! This library provides an concurrent insert only interner.

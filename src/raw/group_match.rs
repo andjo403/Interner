@@ -1,5 +1,5 @@
 use super::bitmask::BitMaskIter;
-use std::simd::{u8x8, ToBitMask};
+use std::simd::{u8x8, SimdPartialEq, ToBitMask};
 
 /// Returns a `BitMask` indicating all hash bytes in the group which have
 /// the given value.
@@ -7,14 +7,14 @@ use std::simd::{u8x8, ToBitMask};
 pub(crate) fn match_byte(valid_bits: u8, hashes: u64, value: u8) -> BitMaskIter {
     let hashes = u8x8::from_slice(&hashes.to_ne_bytes());
     let values = u8x8::splat(value);
-    BitMaskIter::new(hashes.lanes_eq(values).to_bitmask() & valid_bits)
+    BitMaskIter::new(hashes.simd_eq(values).to_bitmask() & valid_bits)
 }
 
 pub(crate) fn count_locked_slots(valid_bits: u8, hashes: u64) -> isize {
     let hashes = u8x8::from_slice(&hashes.to_ne_bytes());
     let values = u8x8::from_slice(&0x0u64.to_ne_bytes());
 
-    (hashes.lanes_ne(values).to_bitmask() & !valid_bits & 0x7f).count_ones() as isize
+    (hashes.simd_ne(values).to_bitmask() & !valid_bits & 0x7f).count_ones() as isize
 }
 
 #[cfg(test)]

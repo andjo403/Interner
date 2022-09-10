@@ -1,6 +1,6 @@
 use crate::sync::{fence, AtomicU64, Condvar, Mutex, Ordering};
-use std::lazy::SyncLazy;
 use std::mem::{self, MaybeUninit};
+use std::sync::LazyLock;
 
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
 const LOCKED_BIT: u8 = 0x01;
@@ -37,7 +37,7 @@ pub(crate) struct MetaData {
     meta_data: AtomicU64,
 }
 
-static CONDVARS: SyncLazy<[(Mutex<()>, Condvar); 64]> = SyncLazy::new(|| {
+static CONDVARS: LazyLock<[(Mutex<()>, Condvar); 64]> = LazyLock::new(|| {
     // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
     // safe because the type we are claiming to have initialized here is a
     // bunch of `MaybeUninit`s, which do not require initialization.
