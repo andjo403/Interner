@@ -1,4 +1,4 @@
-use crate::raw::{make_hash, LockResult, RawInterner};
+use crate::raw_interner::{make_hash, LockResult, RawInterner};
 use crate::sync::{AtomicPtr, Ordering};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
@@ -155,7 +155,7 @@ where
         Q: Sync + Send + Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Acquire) };
+        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         loop {
             match raw_interner.lock_or_get_slot(hash, value) {
                 LockResult::Found(result) => {

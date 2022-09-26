@@ -8,13 +8,10 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Once;
 
-mod bitmask;
-use bitmask::BitMaskIter;
-mod meta_data;
+use crate::bitmask::BitMaskIter;
 
-mod group_match;
-use self::group_match::{count_locked_slots, match_byte};
-use meta_data::{bucket_full, get_valid_bits, MetaData, ReserveResult};
+use crate::group_match::{count_locked_slots, match_byte};
+use crate::meta_data::{bucket_full, get_valid_bits, MetaData, ReserveResult};
 
 /// Probe sequence based on triangular numbers, which is guaranteed (since our
 /// table size is a power of two) to visit every group of elements exactly once.
@@ -40,11 +37,9 @@ impl Iterator for ProbeSeq {
         if self.stride >= self.resize_limit {
             return None;
         }
-        let result = self.pos;
+        let pos = (self.pos + self.stride) & self.bucket_mask;
         self.stride += 1;
-        self.pos += self.stride;
-        self.pos &= self.bucket_mask;
-        Some(result)
+        Some(pos)
     }
 }
 
@@ -55,15 +50,15 @@ fn h1(hash: u64) -> usize {
     hash as usize
 }
 
+//While the hash is normally a full 64-bit value, some hash functions (such as FxHash)
+//produce a usize result instead, which means that the top 32 bits are 0 on 32-bit platforms.
+const HASH_BITS: u32 = if usize::BITS < u64::BITS { usize::BITS } else { u64::BITS };
+
 /// Secondary hash function, saved in the meta data.
 #[inline]
 fn h2(hash: u64) -> u8 {
-    // Grab the top 8 bits of the hash. While the hash is normally a full 64-bit
-    // value, some hash functions (such as FxHash) produce a usize result
-    // instead, which means that the top 32 bits are 0 on 32-bit platforms.
-    let hash_len = usize::min(std::mem::size_of::<usize>(), std::mem::size_of::<u64>());
-    let top8 = hash >> (hash_len * 8 - 8);
-    top8 as u8 // truncation
+    // Grab the top 8 bits of the hash.
+    (hash >> (HASH_BITS - 8)) as u8
 }
 
 /// Returns the number of buckets needed to hold the given number of items,
@@ -72,11 +67,9 @@ fn h2(hash: u64) -> u8 {
 /// Returns `None` if an overflow occurs.
 #[inline]
 fn capacity_to_buckets(cap: usize) -> Option<usize> {
-    // require 1/8 buckets to be empty (87.5% load)
-    let adjusted_cap = cap.checked_mul(8)? / 7;
-    // as there is 7 elemntes in each bucket
-    let adjusted_buckets =
-        if adjusted_cap % 7 == 0 { adjusted_cap / 7 } else { adjusted_cap / 7 + 1 };
+    // begin with 1/7 slot per bucket to be empty (85.7% load)
+    // and there is 7 elemnts per bucket
+    let adjusted_buckets = (cap.checked_mul(7)? + 5) / 6;
 
     // Any overflows will have been caught by the checked_mul. Also, any
     // rounding errors from the division above will be cleaned up by
@@ -244,7 +237,7 @@ where
     }
 
     /// Returns an iterator for a probe sequence on the table.
-    #[cfg_attr(feature = "inline-more", inline)]
+    #[inline]
     fn probe_seq(&self, hash: u64) -> ProbeSeq {
         ProbeSeq {
             bucket_mask: self.bucket_mask,
@@ -290,9 +283,9 @@ where
                         return LockResult::Locked(LockedData { pos, index, group_meta_data });
                     }
                     ReserveResult::AlreadyReservedWithSameH2 => {
-                        bucket.meta_data.wait_on_lock_release(&mut group_meta_data, index, h2);
+                        bucket.meta_data.wait_on_lock_release(&mut group_meta_data, index);
                         let result = bucket.get_ref_to_slot(index);
-                        if value.eq((*result).borrow()) {
+                        if (*value).eq((*result).borrow()) {
                             return LockResult::Found(*result);
                         }
                         continue;
@@ -306,7 +299,7 @@ where
                     }
                     ReserveResult::Occupied => {
                         let result = bucket.get_ref_to_slot(index);
-                        if value.eq((*result).borrow()) {
+                        if (*value).eq((*result).borrow()) {
                             return LockResult::Found(*result);
                         }
                         continue;
@@ -392,10 +385,10 @@ where
         &self,
         hash_builder: &impl BuildHasher,
     ) -> &Self {
-        let new_number_of_buckets = (self.bucket_mask + 1) * 2;
         let mut created = false;
 
         self.next_raw_interner_lock.call_once(|| {
+            let new_number_of_buckets = (self.bucket_mask + 1) * 2;
             let raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
             self.next_raw_interner.store(Box::into_raw(raw_interner), Ordering::Release);
             created = true;

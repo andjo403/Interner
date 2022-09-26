@@ -136,3 +136,21 @@ fn multi_threaded_resize() {
         assert_eq!(i, *result);
     });
 }
+
+#[test]
+fn intern_same_value_no_initial_capacity() {
+    let x = vec![42];
+    let static_ref: &'static [usize] = x.leak();
+    let interner = Arc::new(Interner::with_capacity_and_hasher(0, FxBuildHasher::default()));
+
+    let interner2 = Arc::clone(&interner);
+    let thread = std::thread::spawn(move || {
+        let result = interner2.intern_ref(&static_ref[0], || &static_ref[0]);
+        assert_eq!(&42, result);
+    });
+    let result = interner.intern_ref(&static_ref[0], || &static_ref[0]);
+    assert_eq!(&42, result);
+    let result = interner.intern_ref(&static_ref[0], || unimplemented!());
+    assert_eq!(&42, result);
+    thread.join().unwrap();
+}

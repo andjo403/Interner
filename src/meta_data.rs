@@ -1,7 +1,5 @@
-use crate::sync::{fence, AtomicU64, Condvar, Mutex, Ordering};
-use std::mem::{self, MaybeUninit};
-use std::sync::LazyLock;
-
+use crate::atomic_wait::{wait, wake_all};
+use crate::sync::{fence, AtomicU64, Ordering};
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
 const LOCKED_BIT: u8 = 0x01;
 
@@ -37,33 +35,12 @@ pub(crate) struct MetaData {
     meta_data: AtomicU64,
 }
 
-static CONDVARS: LazyLock<[(Mutex<()>, Condvar); 64]> = LazyLock::new(|| {
-    // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-    // safe because the type we are claiming to have initialized here is a
-    // bunch of `MaybeUninit`s, which do not require initialization.
-    let mut condvars: [MaybeUninit<(Mutex<()>, Condvar)>; 64] =
-        unsafe { MaybeUninit::uninit().assume_init() };
-
-    // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
-    // assignment instead of `ptr::write` does not cause the old
-    // uninitialized value to be dropped. Also if there is a panic during
-    // this loop, we have a memory leak, but there is no memory safety
-    // issue.
-    for elem in &mut condvars[..] {
-        elem.write(Default::default());
-    }
-
-    // Everything is initialized. Transmute the array to the
-    // initialized type.
-    unsafe { mem::transmute::<_, [(Mutex<()>, Condvar); 64]>(condvars) }
-});
-
 #[inline]
 fn valid_bit(index: usize) -> u64 {
     1 << (64 - 8 + index)
 }
 #[inline]
-fn test_valid_bit(group_meta_data: u64, index: usize) -> bool {
+pub(crate) fn test_valid_bit(group_meta_data: u64, index: usize) -> bool {
     group_meta_data & valid_bit(index) != 0
 }
 #[inline]
@@ -127,7 +104,7 @@ impl MetaData {
             match self.meta_data.compare_exchange_weak(
                 *group_meta_data,
                 new_group_meta_data,
-                Ordering::Acquire,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -143,7 +120,7 @@ impl MetaData {
     }
 
     #[cold]
-    pub(crate) fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize, h2: u8) {
+    pub(crate) fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize) {
         let mut group_meta_data = self.meta_data.load(Ordering::Relaxed);
         loop {
             if test_valid_bit(group_meta_data, index) {
@@ -164,10 +141,9 @@ impl MetaData {
                     continue;
                 }
             }
-            let h2 = (h2 >> 2) as usize;
-            let (lock, condvar) = &CONDVARS[h2];
-            let guard = lock.lock().unwrap();
-            drop(condvar.wait(guard).unwrap());
+
+            // Park our thread until we are woken up by an unlock
+            wait(&self.meta_data, index);
             // Loop back and check if the valid bit was set
             group_meta_data = self.meta_data.load(Ordering::Relaxed);
         }
@@ -190,7 +166,7 @@ impl MetaData {
             ) {
                 Ok(_) => {
                     if test_park_bit(group_meta_data, index) {
-                        self.unpark_all(h2);
+                        wake_all(&self.meta_data, index);
                     }
                     return bucket_moved(group_meta_data);
                 }
@@ -199,14 +175,6 @@ impl MetaData {
                 }
             }
         }
-    }
-
-    #[cold]
-    fn unpark_all(&self, h2: u8) {
-        let h2 = (h2 >> 2) as usize;
-        let (lock, condvar) = &CONDVARS[h2];
-        let _guard = lock.lock().unwrap();
-        condvar.notify_all();
     }
 
     #[inline]
