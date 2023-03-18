@@ -297,7 +297,7 @@ where
                     ReserveResult::SlotAvailableButGroupMoved => {
                         return LockResult::Moved;
                     }
-                    ReserveResult::Occupied => {
+                    ReserveResult::OccupiedWithSameH2 => {
                         let result = bucket.get_ref_to_slot(index);
                         if (*value).eq((*result).borrow()) {
                             return LockResult::Found(*result);
@@ -339,7 +339,7 @@ where
                     }
                     ReserveResult::AlreadyReservedWithSameH2
                     | ReserveResult::AlreadyReservedWithOtherH2
-                    | ReserveResult::Occupied => {
+                    | ReserveResult::OccupiedWithSameH2 => {
                         continue;
                     }
                 }
