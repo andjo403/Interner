@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 #![feature(once_cell)]
 #![feature(portable_simd)]
 
@@ -13,6 +12,5 @@ mod group_match;
 pub mod interner;
 mod meta_data;
 mod raw_interner;
-mod sync;
 
 pub use crate::interner::Interner;

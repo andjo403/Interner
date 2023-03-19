@@ -1,5 +1,5 @@
 use crate::atomic_wait::{wait, wake_all};
-use crate::sync::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
 const LOCKED_BIT: u8 = 0x80;
 const PARK_BIT: u8 = 0x40;

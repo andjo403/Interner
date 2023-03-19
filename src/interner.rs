@@ -1,8 +1,8 @@
 use crate::raw_interner::{make_hash, LockResult, RawInterner};
-use crate::sync::{AtomicPtr, Ordering};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Default hasher for `HashMap`.
 pub type DefaultHashBuilder = RandomState;
@@ -14,10 +14,7 @@ pub struct Interner<T, S = DefaultHashBuilder> {
     current_raw_interner: AtomicPtr<RawInterner<T>>,
 }
 
-impl<T> Interner<T, DefaultHashBuilder>
-where
-    T: Sync + Send + Copy,
-{
+impl<T> Interner<T, DefaultHashBuilder> {
     /// Creates an empty `Interner`.
     ///
     /// The Interner is initially created with a capacity of 0, so it will not allocate until it
@@ -51,10 +48,7 @@ where
     }
 }
 
-impl<T, S> Interner<T, S>
-where
-    T: Sync + Send + Copy,
-{
+impl<T, S> Interner<T, S> {
     /// Creates an empty `Interner` which will use the given hash builder to hash
     /// keys.
     ///
@@ -149,10 +143,10 @@ where
     /// let result = interner.intern_ref(&value2,|| {&value2});
     /// assert_eq!(&value2,result);
     /// ```
-    pub fn intern_ref<Q: Sized>(&self, value: &Q, make: impl FnOnce() -> T) -> T
+    pub fn intern_ref<Q: ?Sized>(&self, value: &Q, make: impl FnOnce() -> T) -> T
     where
-        T: Sync + Send + Borrow<Q> + Copy,
-        Q: Sync + Send + Hash + Eq,
+        T: Borrow<Q> + Copy,
+        Q: Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
@@ -181,12 +175,96 @@ where
             }
         }
     }
+
+    /// Interns the value and returns a reference to the interned value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interner::Interner;
+    ///
+    /// let value1 :i32 = 42;
+    /// let value2 :i32 = 300;
+    /// let mut interner: Interner<&i32> = Interner::with_capacity(2);
+    /// let result = interner.intern(&value1,|val| {&val});
+    /// assert_eq!(&value1,result);
+    /// let result = interner.intern(&value2,|val| {&val});
+    /// assert_eq!(&value2,result);
+    /// let result = interner.intern(&value2,|val| {&val});
+    /// assert_eq!(&value2,result);
+    /// ```
+    pub fn intern<Q>(&self, value: Q, make: impl FnOnce(Q) -> T) -> T
+    where
+        T: Borrow<Q> + Copy,
+        Q: Hash + Eq,
+    {
+        let hash = make_hash(&self.hash_builder, &value);
+        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
+        loop {
+            match raw_interner.lock_or_get_slot(hash, &value) {
+                LockResult::Found(result) => {
+                    return result;
+                }
+                LockResult::Locked(locked_data) => {
+                    let result = make(value);
+                    raw_interner.unlock_and_set_value(
+                        hash,
+                        result,
+                        locked_data,
+                        &self.hash_builder,
+                    );
+                    return result;
+                }
+                LockResult::ResizeNeeded => {
+                    raw_interner =
+                        raw_interner.create_and_stor_next_raw_interner(&self.hash_builder);
+                }
+                LockResult::Moved => {
+                    raw_interner = raw_interner.get_next_raw_interner();
+                }
+            }
+        }
+    }
+
+    /// get already interned value if available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interner::Interner;
+    ///
+    /// let value1 :i32 = 42;
+    /// let mut interner: Interner<&i32> = Interner::with_capacity(2);
+    /// assert!(interner.get(&value1,|val| {*val == &value1}).is_none());
+    /// let result = interner.intern_ref(&value1,|| {&value1});
+    /// assert_eq!(&value1,result);
+    /// let result = interner.get(&value1,|val| {*val == &value1}).expect("was interned above");
+    /// assert_eq!(&value1,*result);
+    /// ```
+    pub fn get<Q: ?Sized, F>(&self, value: &Q, mut is_match: F) -> Option<&T>
+    where
+        for<'b> F: FnMut(&'b T) -> bool,
+        T: Borrow<Q>,
+        Q: Hash,
+    {
+        let hash = make_hash(&self.hash_builder, value);
+        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
+        loop {
+            match raw_interner.get(hash, &mut is_match) {
+                Some(result) => {
+                    return result;
+                }
+                None => {
+                    raw_interner = raw_interner.get_next_raw_interner();
+                }
+            }
+        }
+    }
 }
 
 impl<T, S> Default for Interner<T, S>
 where
     S: Default,
-    T: Sync + Send + Copy,
 {
     /// Creates an empty `Interner<T, S>`, with the `Default` value for the hasher.
     #[inline]
@@ -201,5 +279,5 @@ impl<T, S> Drop for Interner<T, S> {
     }
 }
 
-unsafe impl<T, S> Sync for Interner<T, S> {}
-unsafe impl<T, S> Send for Interner<T, S> {}
+unsafe impl<T: Send, S: Sync> Sync for Interner<T, S> {}
+unsafe impl<T: Send, S: Send> Send for Interner<T, S> {}

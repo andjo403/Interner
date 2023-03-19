@@ -1,4 +1,3 @@
-use crate::sync::{AtomicIsize, AtomicPtr, Ordering};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
@@ -6,12 +5,13 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 use std::sync::Once;
 
 use crate::bitmask::BitMaskIter;
 
 use crate::group_match::{count_locked_slots, match_byte};
-use crate::meta_data::{bucket_full, get_valid_bits, MetaData, ReserveResult};
+use crate::meta_data::{bucket_full, bucket_moved, get_valid_bits, MetaData, ReserveResult};
 
 /// Probe sequence based on triangular numbers, which is guaranteed (since our
 /// table size is a power of two) to visit every group of elements exactly once.
@@ -107,7 +107,7 @@ impl<T> Bucket<T> {
         hash_builder: &impl BuildHasher,
     ) -> isize
     where
-        T: Sync + Send + Copy + Hash,
+        T: Copy + Hash,
     {
         let mut group_meta_data = 0;
         if !self.meta_data.mark_as_moved(&mut group_meta_data) {
@@ -174,17 +174,14 @@ impl<T> Drop for RawInterner<T> {
             unsafe { dealloc(ptr, layout) };
             self.buckets = std::ptr::null_mut();
         }
-        if self.next_raw_interner_lock.is_completed() {
-            let temp = self.next_raw_interner.load(Ordering::Relaxed);
+        let temp = self.next_raw_interner.load(Ordering::Relaxed);
+        if temp != std::ptr::null_mut() {
             let _next_raw_internere = unsafe { Box::from_raw(temp) };
         }
     }
 }
 
-impl<T> RawInterner<T>
-where
-    T: Sync + Send + Copy,
-{
+impl<T> RawInterner<T> {
     /// Creates a new empty hash table without allocating any memory.
     ///
     /// In effect this returns a table with exactly 1 bucket. However we can
@@ -249,10 +246,10 @@ where
 
     /// Searches for an element in the table and if not found lockes a slot to be able to add the element
     #[inline]
-    pub(crate) fn lock_or_get_slot<Q>(&self, hash: u64, value: &Q) -> LockResult<T>
+    pub(crate) fn lock_or_get_slot<Q: ?Sized>(&self, hash: u64, value: &Q) -> LockResult<T>
     where
-        T: Borrow<Q>,
-        Q: Sync + Send + Eq,
+        T: Borrow<Q> + Copy,
+        Q: Eq,
     {
         let h2 = h2(hash);
         for pos in self.probe_seq(hash) {
@@ -349,9 +346,50 @@ where
     }
 }
 
+impl<'a, T> RawInterner<T> {
+    /// Searches for an element in the table
+    #[inline]
+    pub(crate) fn get(
+        &'a self,
+        hash: u64,
+        is_match: &mut dyn FnMut(&T) -> bool,
+    ) -> Option<Option<&T>> {
+        let h2 = h2(hash);
+
+        for pos in self.probe_seq(hash) {
+            // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
+            let bucket = unsafe { &*self.buckets.add(pos) };
+            let group_meta_data = bucket.meta_data.get_metadata_acquire();
+            let valid_bits = get_valid_bits(group_meta_data);
+            for index in match_byte(valid_bits, group_meta_data, h2) {
+                let result = bucket.get_ref_to_slot(index);
+                if is_match((*result).borrow()) {
+                    return Some(Some(result));
+                }
+            }
+
+            if bucket_full(group_meta_data) {
+                // not found in this bucket and the bucket is full try the next bucket
+                continue;
+            }
+
+            if bucket_moved(group_meta_data) {
+                return None;
+            }
+            break;
+        }
+        return Some(None);
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn get_next_raw_interner(&self) -> &Self {
+        unsafe { &*self.next_raw_interner.load(Ordering::Acquire) }
+    }
+}
+
 impl<T> RawInterner<T>
 where
-    T: Sync + Send + Copy + Hash,
+    T: Copy + Hash,
 {
     // unlock the slot by marking the element as valid unparks all threads blocked on this slot
     // and if the bucket is moved transer the value to the new interner also.
@@ -374,11 +412,6 @@ where
             self.transfer_value_to_newer_interner(h2, hash, value, hash_builder);
             self.to_be_moved.fetch_sub(1, Ordering::Release);
         }
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) fn get_next_raw_interner(&self) -> &Self {
-        unsafe { &*self.next_raw_interner.load(Ordering::Acquire) }
     }
 
     pub(crate) fn create_and_stor_next_raw_interner(

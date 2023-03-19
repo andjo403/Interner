@@ -9,7 +9,7 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-parking_lot_core = "0.9.7"
+parking_lot_core = "0.8.5"
 
 [profile.release]
 debug = 2
@@ -19,9 +19,6 @@ fxhash = "0.2.1"
 rayon = "1.7"
 criterion = "0.4"
 smallvec = { version = "1.0", features = ["union", "may_dangle"] }
-
-[target.'cfg(loom)'.dependencies]
-loom = { version = "0.5.6", features = ["checkpoint"]}
 
 [features]
 
