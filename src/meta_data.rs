@@ -193,78 +193,176 @@ impl MetaData {
     }
 }
 
-#[test]
-fn reserve_reserved() {
-    let meta_data = MetaData { meta_data: AtomicU64::new(0) };
-    let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0x3F, 0);
-    assert_eq!(meta_data.get_metadata_acquire(), 0xBF);
-    assert_eq!(result, ReserveResult::Reserved);
-    assert_eq!(group_meta_data, 0xBF);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reserve_reserved() {
+        let meta_data = MetaData { meta_data: AtomicU64::new(0) };
+        let mut group_meta_data = 0;
+        let result = meta_data.reserve(&mut group_meta_data, 0x3F, 0);
+        assert_eq!(meta_data.get_metadata_acquire(), 0xBF);
+        assert_eq!(result, ReserveResult::Reserved);
+        assert_eq!(group_meta_data, 0xBF);
+    }
 
-#[test]
-fn reserve_reserved_index1() {
-    let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
-    let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
-    let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_BFAB);
-    assert_eq!(result, ReserveResult::Reserved);
-    assert_eq!(group_meta_data, 0x100_0000_0000_BFAB);
-}
+    #[test]
+    fn reserve_reserved_index1() {
+        let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
+        let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
+        let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_BFAB);
+        assert_eq!(result, ReserveResult::Reserved);
+        assert_eq!(group_meta_data, 0x100_0000_0000_BFAB);
+    }
 
-#[test]
-fn reserve_occupied() {
-    let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
-    let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_00AB);
-    assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-    assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
-    let result = meta_data.reserve(&mut group_meta_data, 0xAB, 0);
-    assert_eq!(result, ReserveResult::OccupiedWithSameH2);
-}
+    #[test]
+    fn reserve_occupied() {
+        let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
+        let mut group_meta_data = 0;
+        let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_00AB);
+        assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
+        assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
+        let result = meta_data.reserve(&mut group_meta_data, 0xAB, 0);
+        assert_eq!(result, ReserveResult::OccupiedWithSameH2);
+    }
 
-#[test]
-fn reserve_occupied_index1() {
-    let meta_data = MetaData {
-        meta_data: AtomicU64::new(
-            valid_bit(0) | h2_bits(0xAB, 0) | valid_bit(1) | h2_bits(0xAA, 1),
-        ),
-    };
-    let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_AAAB);
-    assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-    assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
-}
+    #[test]
+    fn reserve_occupied_index1() {
+        let meta_data = MetaData {
+            meta_data: AtomicU64::new(
+                valid_bit(0) | h2_bits(0xAB, 0) | valid_bit(1) | h2_bits(0xAA, 1),
+            ),
+        };
+        let mut group_meta_data = 0;
+        let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_AAAB);
+        assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
+        assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
+    }
 
-#[test]
-fn reserve_already_reserved_with_other_h2() {
-    let meta_data = MetaData { meta_data: AtomicU64::new(h2_bits(0xAD, 0)) };
-    let mut group_meta_data = 0;
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-    assert_eq!(meta_data.get_metadata_acquire(), 0xAD);
-    assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-    assert_eq!(group_meta_data, 0xAD);
-}
+    #[test]
+    fn reserve_already_reserved_with_other_h2() {
+        let meta_data = MetaData { meta_data: AtomicU64::new(h2_bits(0xAD, 0)) };
+        let mut group_meta_data = 0;
+        let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
+        assert_eq!(meta_data.get_metadata_acquire(), 0xAD);
+        assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
+        assert_eq!(group_meta_data, 0xAD);
+    }
 
-#[test]
-fn reserve_already_reserved_with_other_h2_index1() {
-    let meta_data =
-        MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
-    let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
-    let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_ADAB);
-    assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-    assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
-}
+    #[test]
+    fn reserve_already_reserved_with_other_h2_index1() {
+        let meta_data = MetaData {
+            meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)),
+        };
+        let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
+        let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_ADAB);
+        assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
+        assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
+    }
 
-#[test]
-fn set_valid() {
-    let meta_data =
-        MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)) };
-    let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
-    meta_data.set_valid_and_unpark(group_meta_data, 0xAC, 1);
-    assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_ACAB);
+    #[test]
+    fn set_valid() {
+        let meta_data = MetaData {
+            meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1)),
+        };
+        let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
+        meta_data.set_valid_and_unpark(group_meta_data, 0xAC, 1);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_ACAB);
+    }
+
+    #[test]
+    fn wait() {
+        use std::thread;
+        use std::time::Duration;
+        let meta_data = MetaData { meta_data: AtomicU64::new(0) };
+        let mut group_meta_data = meta_data.get_metadata_acquire();
+        let h2 = [0xBA, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[0], 0));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[1], 1));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[2], 2));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[3], 3));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[4], 4));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[5], 5));
+        assert_eq!(ReserveResult::Reserved, meta_data.reserve(&mut group_meta_data, h2[6], 6));
+        thread::scope(|s| {
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 0;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 1;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 2;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 3;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 4;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 5;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            s.spawn(|| {
+                let mut group_meta_data = meta_data.get_metadata_acquire();
+                let index = 6;
+                assert_eq!(
+                    ReserveResult::AlreadyReservedWithSameH2,
+                    meta_data.reserve(&mut group_meta_data, h2[index], index)
+                );
+                meta_data.wait_on_lock_release(&mut group_meta_data, index);
+            });
+            thread::sleep(Duration::from_secs(5));
+            let group_meta_data = meta_data.get_metadata_acquire();
+            for index in 0..7 {
+                assert!(test_lock_bit(group_meta_data, index));
+                assert!(test_park_bit(group_meta_data, index));
+            }
+            for index in 0..7 {
+                meta_data.set_valid_and_unpark(group_meta_data, h2[index], index);
+                let group_meta = meta_data.get_metadata_acquire();
+                eprintln!("test group_meta_data {group_meta:016x}, index {index}");
+            }
+        });
+    }
 }

@@ -11,7 +11,7 @@ fn lock_addr(group_meta_data: &AtomicU64, index: usize) -> usize {
 pub(crate) fn wait(group_meta_data: &AtomicU64, index: usize) {
     // Park our thread until we are woken up by an unlock
     let addr = lock_addr(group_meta_data, index);
-    let validate = || test_valid_bit(group_meta_data.load(Ordering::Relaxed), index);
+    let validate = || !test_valid_bit(group_meta_data.load(Ordering::Relaxed), index);
     let before_sleep = || {};
     let timed_out = |_, _| {};
     // SAFETY:

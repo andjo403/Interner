@@ -243,7 +243,7 @@ where
     /// ```
     pub fn get<Q: ?Sized, F>(&self, value: &Q, mut is_match: F) -> Option<&T>
     where
-        for<'b> F: FnMut(&'b T) -> bool,
+        F: FnMut(&T) -> bool,
         T: Borrow<Q>,
         Q: Hash,
     {
