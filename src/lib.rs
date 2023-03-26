@@ -1,3 +1,4 @@
+#![feature(dropck_eyepatch)]
 #![feature(once_cell)]
 #![feature(portable_simd)]
 

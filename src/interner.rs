@@ -2,6 +2,7 @@ use crate::raw_interner::{make_hash, LockResult, RawInterner};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Default hasher for `HashMap`.
@@ -12,6 +13,7 @@ pub struct Interner<T, S = DefaultHashBuilder> {
     hash_builder: S,
     raw_interners: *mut RawInterner<T>,
     current_raw_interner: AtomicPtr<RawInterner<T>>,
+    phantom: PhantomData<T>,
 }
 
 impl<T> Interner<T, DefaultHashBuilder> {
@@ -98,7 +100,7 @@ impl<T, S> Interner<T, S> {
         let raw_interner = Box::new(RawInterner::with_capacity(capacity));
         let raw_interners = Box::into_raw(raw_interner);
         let current_raw_interner = AtomicPtr::new(raw_interners);
-        Self { hash_builder, raw_interners, current_raw_interner }
+        Self { hash_builder, raw_interners, current_raw_interner, phantom: PhantomData }
     }
 
     /// Returns a reference to the map's [`BuildHasher`].
@@ -232,22 +234,23 @@ where
     ///
     /// ```
     /// use interner::Interner;
+    /// use std::hash::{BuildHasher, Hash, Hasher };
     ///
     /// let value1 :i32 = 42;
     /// let mut interner: Interner<&i32> = Interner::with_capacity(2);
-    /// assert!(interner.get(&value1,|val| {*val == &value1}).is_none());
+    /// let mut state = interner.hasher().build_hasher();
+    /// value1.hash(&mut state);
+    /// let hash = state.finish();
+    /// assert!(interner.get_from_hash(hash,|val| {*val == &value1}).is_none());
     /// let result = interner.intern_ref(&value1,|| {&value1});
     /// assert_eq!(&value1,result);
-    /// let result = interner.get(&value1,|val| {*val == &value1}).expect("was interned above");
+    /// let result = interner.get_from_hash(hash, |val| {*val == &value1}).expect("was interned above");
     /// assert_eq!(&value1,*result);
     /// ```
-    pub fn get<Q: ?Sized, F>(&self, value: &Q, mut is_match: F) -> Option<&T>
+    pub fn get_from_hash<F>(&self, hash: u64, mut is_match: F) -> Option<&T>
     where
         F: FnMut(&T) -> bool,
-        T: Borrow<Q>,
-        Q: Hash,
     {
-        let hash = make_hash(&self.hash_builder, value);
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         loop {
             match raw_interner.get(hash, &mut is_match) {
@@ -273,11 +276,11 @@ where
     }
 }
 
-impl<T, S> Drop for Interner<T, S> {
+unsafe impl<#[may_dangle] T, S> Drop for Interner<T, S> {
     fn drop(&mut self) {
         let _next_raw_internere = unsafe { Box::from_raw(self.raw_interners) };
     }
 }
 
-unsafe impl<T: Send, S: Sync> Sync for Interner<T, S> {}
-unsafe impl<T: Send, S: Send> Send for Interner<T, S> {}
+unsafe impl<T: Send + Sync, S: Send + Sync> Sync for Interner<T, S> {}
+unsafe impl<T: Send + Sync, S: Send + Sync> Send for Interner<T, S> {}

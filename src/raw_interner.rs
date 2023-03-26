@@ -344,13 +344,11 @@ impl<T> RawInterner<T> {
         }
         LockResult::ResizeNeeded
     }
-}
 
-impl<'a, T> RawInterner<T> {
     /// Searches for an element in the table
     #[inline]
     pub(crate) fn get(
-        &'a self,
+        &self,
         hash: u64,
         is_match: &mut dyn FnMut(&T) -> bool,
     ) -> Option<Option<&T>> {
@@ -363,7 +361,7 @@ impl<'a, T> RawInterner<T> {
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref_to_slot(index);
-                if is_match((*result).borrow()) {
+                if is_match(result) {
                     return Some(Some(result));
                 }
             }
@@ -378,7 +376,7 @@ impl<'a, T> RawInterner<T> {
             }
             break;
         }
-        return Some(None);
+        if self.next_raw_interner_lock.is_completed() { None } else { Some(None) }
     }
 
     #[allow(clippy::mut_from_ref)]

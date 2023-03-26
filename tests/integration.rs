@@ -41,6 +41,25 @@ fn intern_ref() {
 }
 
 #[test]
+fn intern_ref_array() {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let array = [42, 2, 3, 4, 5, 6, 7, 8, 9];
+    let interner: Interner<&[i32]> = Interner::new();
+    let slice = &array[..];
+    let mut state = interner.hasher().build_hasher();
+    slice.hash(&mut state);
+    let hash = state.finish();
+    let is_match = |val: &&[i32]| *val == slice;
+
+    let result = interner.intern_ref(slice, || slice);
+    assert_eq!(slice, result);
+    let result = interner.intern_ref(slice, || unimplemented!());
+    assert_eq!(slice, result);
+    let result = interner.get_from_hash(hash, is_match);
+    assert_eq!(slice, *result.unwrap());
+}
+
+#[test]
 fn intern_ref2() {
     let mut vector = Vec::<u64>::with_capacity(ITER as usize + 100);
     for i in 0..ITER {
