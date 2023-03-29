@@ -122,7 +122,7 @@ impl<T> Bucket<T> {
             let h2 = h2(hash);
             new_raw_interner.transfer_value_to_newer_interner(h2, hash, *value, hash_builder);
         }
-        count_locked_slots(valid_bits, group_meta_data)
+        count_locked_slots(valid_bits, group_meta_data) + 1 // add one to markbucket as done
     }
 }
 pub(crate) struct LockedData {
@@ -195,7 +195,7 @@ impl<T> RawInterner<T> {
             resize_limit: 0,
             next_raw_interner: AtomicPtr::default(),
             next_raw_interner_lock: Once::new(),
-            to_be_moved: AtomicIsize::new(-1),
+            to_be_moved: AtomicIsize::new(0),
             phantom: PhantomData,
         }
     }
@@ -216,7 +216,7 @@ impl<T> RawInterner<T> {
             resize_limit: buckets_to_resize_limit(buckets),
             next_raw_interner: AtomicPtr::default(),
             next_raw_interner_lock: Once::new(),
-            to_be_moved: AtomicIsize::new(-1),
+            to_be_moved: AtomicIsize::new(0 - (buckets as isize)),
             phantom: PhantomData,
         }
     }
@@ -381,7 +381,10 @@ impl<T> RawInterner<T> {
 
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn get_next_raw_interner(&self) -> &Self {
-        unsafe { &*self.next_raw_interner.load(Ordering::Acquire) }
+        unsafe { &*self.get_next_raw_interner_ptr() }
+    }
+    pub(crate) fn get_next_raw_interner_ptr(&self) -> *mut Self {
+        self.next_raw_interner.load(Ordering::Relaxed)
     }
 }
 
@@ -398,7 +401,7 @@ where
         value: T,
         locked_data: LockedData,
         hash_builder: &impl BuildHasher,
-    ) {
+    ) -> bool {
         let LockedData { pos, index, group_meta_data } = locked_data;
         // SAFTY: as the index is caped by bucket_mask that is the size of buckets - 1
         let bucket = unsafe { &*self.buckets.add(pos) };
@@ -408,26 +411,23 @@ where
         let h2 = h2(hash);
         if bucket.meta_data.set_valid_and_unpark(group_meta_data, h2, index) {
             self.transfer_value_to_newer_interner(h2, hash, value, hash_builder);
-            self.to_be_moved.fetch_sub(1, Ordering::Release);
+            self.to_be_moved.fetch_sub(1, Ordering::Relaxed) == 1
+        } else {
+            false
         }
     }
 
     pub(crate) fn create_and_stor_next_raw_interner(
         &self,
         hash_builder: &impl BuildHasher,
-    ) -> &Self {
-        let mut created = false;
-
+    ) -> bool {
         self.next_raw_interner_lock.call_once(|| {
             let new_number_of_buckets = (self.bucket_mask + 1) * 2;
             let raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
             self.next_raw_interner.store(Box::into_raw(raw_interner), Ordering::Release);
-            created = true;
         });
-        if created {
-            self.transfer(self.get_next_raw_interner(), hash_builder);
-        }
-        self.get_next_raw_interner()
+        self.transfer(self.get_next_raw_interner(), hash_builder);
+        self.to_be_moved.load(Ordering::Relaxed) == 0
     }
 
     fn transfer(&self, new_raw_interner: &Self, hash_builder: &impl BuildHasher) {
@@ -438,7 +438,7 @@ where
                 to_be_moved += bucket.transfer_bucket(new_raw_interner, hash_builder);
             }
         }
-        self.to_be_moved.fetch_add(to_be_moved + 1, Ordering::Release);
+        self.to_be_moved.fetch_add(to_be_moved, Ordering::Relaxed);
     }
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
@@ -454,7 +454,8 @@ where
         loop {
             match raw_interner.lock_slot_for_transfer(h2, hash) {
                 LockResult::ResizeNeeded => {
-                    raw_interner = raw_interner.create_and_stor_next_raw_interner(hash_builder);
+                    raw_interner.create_and_stor_next_raw_interner(hash_builder);
+                    raw_interner = raw_interner.get_next_raw_interner();
                 }
                 LockResult::Moved => {
                     raw_interner = raw_interner.get_next_raw_interner();
