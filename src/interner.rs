@@ -148,8 +148,8 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, value);
-        let start_interner = self.current_raw_interner.load(Ordering::Relaxed);
-        let mut raw_interner = unsafe { &*start_interner };
+        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
+        let mut is_current_interner = true;
         loop {
             match raw_interner.lock_or_get_slot(hash, value) {
                 LockResult::Found(result) => {
@@ -162,14 +162,23 @@ where
                         result,
                         locked_data,
                         &self.hash_builder,
-                    ) {
-                        self.update_current_raw_interner(start_interner, raw_interner);
+                    ) && is_current_interner
+                    {
+                        self.current_raw_interner.store(
+                            raw_interner.get_next_moved_raw_interner_ptr(),
+                            Ordering::Relaxed,
+                        );
                     }
                     return result;
                 }
                 LockResult::ResizeNeeded => {
-                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder) {
-                        self.update_current_raw_interner(start_interner, raw_interner);
+                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
+                        && is_current_interner
+                    {
+                        self.current_raw_interner.store(
+                            raw_interner.get_next_moved_raw_interner_ptr(),
+                            Ordering::Relaxed,
+                        );
                     }
                     raw_interner = raw_interner.get_next_raw_interner();
                 }
@@ -177,6 +186,7 @@ where
                     raw_interner = raw_interner.get_next_raw_interner();
                 }
             }
+            is_current_interner = false;
         }
     }
 
@@ -203,8 +213,8 @@ where
         Q: Hash + Eq,
     {
         let hash = make_hash(&self.hash_builder, &value);
-        let start_interner = self.current_raw_interner.load(Ordering::Relaxed);
-        let mut raw_interner = unsafe { &*start_interner };
+        let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
+        let mut is_current_interner = true;
         loop {
             match raw_interner.lock_or_get_slot(hash, &value) {
                 LockResult::Found(result) => {
@@ -217,14 +227,23 @@ where
                         result,
                         locked_data,
                         &self.hash_builder,
-                    ) {
-                        self.update_current_raw_interner(start_interner, raw_interner);
+                    ) && is_current_interner
+                    {
+                        self.current_raw_interner.store(
+                            raw_interner.get_next_moved_raw_interner_ptr(),
+                            Ordering::Relaxed,
+                        );
                     }
                     return result;
                 }
                 LockResult::ResizeNeeded => {
-                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder) {
-                        self.update_current_raw_interner(start_interner, raw_interner);
+                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
+                        && is_current_interner
+                    {
+                        self.current_raw_interner.store(
+                            raw_interner.get_next_moved_raw_interner_ptr(),
+                            Ordering::Relaxed,
+                        );
                     }
                     raw_interner = raw_interner.get_next_raw_interner();
                 }
@@ -232,20 +251,8 @@ where
                     raw_interner = raw_interner.get_next_raw_interner();
                 }
             }
+            is_current_interner = false;
         }
-    }
-
-    fn update_current_raw_interner(
-        &self,
-        start_interner: *mut RawInterner<T>,
-        raw_interner: &RawInterner<T>,
-    ) {
-        let _ = self.current_raw_interner.compare_exchange(
-            start_interner,
-            raw_interner.get_next_raw_interner_ptr(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
     }
 
     /// get already interned value if available.

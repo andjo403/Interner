@@ -160,7 +160,7 @@ pub(crate) struct RawInterner<T> {
     next_raw_interner: AtomicPtr<RawInterner<T>>,
     next_raw_interner_lock: Once,
     // count the slots that have not been moved when the bucket was moved due to the slot was looked at the time of the bucket move
-    // when the sum is zero the transfer is compleate and the new interner can be used.
+    // when the sum is zero the transfer is compleate and only the new interner needs to be used.
     to_be_moved: AtomicIsize,
     phantom: PhantomData<T>,
 }
@@ -175,7 +175,7 @@ unsafe impl<#[may_dangle] T> Drop for RawInterner<T> {
             self.buckets = std::ptr::null_mut();
         }
         let temp = self.next_raw_interner.load(Ordering::Relaxed);
-        if temp != std::ptr::null_mut() {
+        if !temp.is_null() {
             let _next_raw_internere = unsafe { Box::from_raw(temp) };
         }
     }
@@ -195,7 +195,7 @@ impl<T> RawInterner<T> {
             resize_limit: 0,
             next_raw_interner: AtomicPtr::default(),
             next_raw_interner_lock: Once::new(),
-            to_be_moved: AtomicIsize::new(0),
+            to_be_moved: AtomicIsize::new(-1),
             phantom: PhantomData,
         }
     }
@@ -238,7 +238,7 @@ impl<T> RawInterner<T> {
     fn probe_seq(&self, hash: u64) -> ProbeSeq {
         ProbeSeq {
             bucket_mask: self.bucket_mask,
-            pos: h1(hash) & self.bucket_mask,
+            pos: h1(hash),
             stride: 0,
             resize_limit: self.resize_limit,
         }
@@ -379,12 +379,27 @@ impl<T> RawInterner<T> {
         if self.next_raw_interner_lock.is_completed() { None } else { Some(None) }
     }
 
-    #[allow(clippy::mut_from_ref)]
     pub(crate) fn get_next_raw_interner(&self) -> &Self {
-        unsafe { &*self.get_next_raw_interner_ptr() }
+        unsafe { &*self.next_raw_interner.load(Ordering::Acquire) }
     }
-    pub(crate) fn get_next_raw_interner_ptr(&self) -> *mut Self {
-        self.next_raw_interner.load(Ordering::Relaxed)
+
+    // as the next interner can be moved before the current is moved we need to find the first interner that is not moved
+    pub(crate) fn get_next_moved_raw_interner_ptr(&self) -> *mut Self {
+        let mut moved_interner = self.next_raw_interner.load(Ordering::Acquire);
+        loop {
+            let raw_interner = unsafe { &*moved_interner };
+            if raw_interner.next_raw_interner_lock.is_completed() {
+                let next_interner = raw_interner.next_raw_interner.load(Ordering::Acquire);
+                let next = unsafe { &*next_interner };
+                if next.to_be_moved.load(Ordering::Relaxed) == 0 {
+                    moved_interner = next_interner;
+                } else {
+                    return moved_interner;
+                }
+            } else {
+                return moved_interner;
+            }
+        }
     }
 }
 
@@ -426,19 +441,20 @@ where
             let raw_interner = Box::new(Self::new_uninitialized(new_number_of_buckets));
             self.next_raw_interner.store(Box::into_raw(raw_interner), Ordering::Release);
         });
-        self.transfer(self.get_next_raw_interner(), hash_builder);
-        self.to_be_moved.load(Ordering::Relaxed) == 0
+        self.transfer(self.get_next_raw_interner(), hash_builder)
     }
 
-    fn transfer(&self, new_raw_interner: &Self, hash_builder: &impl BuildHasher) {
+    fn transfer(&self, new_raw_interner: &Self, hash_builder: &impl BuildHasher) -> bool {
         let mut to_be_moved = 0;
         if self.bucket_mask != 0 {
             for pos in 0..self.bucket_mask + 1 {
                 let bucket = unsafe { &*self.buckets.add(pos) };
                 to_be_moved += bucket.transfer_bucket(new_raw_interner, hash_builder);
             }
+        } else {
+            to_be_moved = 1;
         }
-        self.to_be_moved.fetch_add(to_be_moved, Ordering::Relaxed);
+        self.to_be_moved.fetch_add(to_be_moved, Ordering::Relaxed) == -to_be_moved
     }
 
     // the value is not allowed to be in this instance of 'RawInterner' and no other thread is allowed to try to intern it
