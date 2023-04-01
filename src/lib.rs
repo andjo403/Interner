@@ -1,5 +1,4 @@
 #![feature(dropck_eyepatch)]
-#![feature(once_cell)]
 #![feature(portable_simd)]
 
 //! This library provides an concurrent insert only interner.
