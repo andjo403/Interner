@@ -165,7 +165,7 @@ pub(crate) struct RawInterner<T> {
     phantom: PhantomData<T>,
 }
 
-impl<T> Drop for RawInterner<T> {
+unsafe impl<#[may_dangle] T> Drop for RawInterner<T> {
     fn drop(&mut self) {
         if !self.buckets.is_null() {
             let layout = Layout::array::<Bucket<T>>(self.bucket_mask + 1)
@@ -470,3 +470,6 @@ where
         }
     }
 }
+
+unsafe impl<T: Send + Sync> Sync for RawInterner<T> {}
+unsafe impl<T: Send + Sync> Send for RawInterner<T> {}
