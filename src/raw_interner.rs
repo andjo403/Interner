@@ -2,6 +2,7 @@ use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::intrinsics::likely;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -238,7 +239,7 @@ impl<T> RawInterner<T> {
     fn probe_seq(&self, hash: u64) -> ProbeSeq {
         ProbeSeq {
             bucket_mask: self.bucket_mask,
-            pos: h1(hash),
+            pos: h1(hash) & self.bucket_mask,
             stride: 0,
             resize_limit: self.resize_limit,
         }
@@ -259,7 +260,7 @@ impl<T> RawInterner<T> {
             let valid_bits = get_valid_bits(group_meta_data);
             for index in match_byte(valid_bits, group_meta_data, h2) {
                 let result = bucket.get_ref_to_slot(index);
-                if (*value).eq((*result).borrow()) {
+                if likely((*value).eq((*result).borrow())) {
                     return LockResult::Found(*result);
                 }
             }
@@ -282,7 +283,7 @@ impl<T> RawInterner<T> {
                     ReserveResult::AlreadyReservedWithSameH2 => {
                         bucket.meta_data.wait_on_lock_release(&mut group_meta_data, index);
                         let result = bucket.get_ref_to_slot(index);
-                        if (*value).eq((*result).borrow()) {
+                        if likely((*value).eq((*result).borrow())) {
                             return LockResult::Found(*result);
                         }
                         continue;
@@ -296,7 +297,7 @@ impl<T> RawInterner<T> {
                     }
                     ReserveResult::OccupiedWithSameH2 => {
                         let result = bucket.get_ref_to_slot(index);
-                        if (*value).eq((*result).borrow()) {
+                        if likely((*value).eq((*result).borrow())) {
                             return LockResult::Found(*result);
                         }
                         continue;
@@ -379,6 +380,7 @@ impl<T> RawInterner<T> {
         if self.next_raw_interner_lock.is_completed() { None } else { Some(None) }
     }
 
+    #[cold]
     pub(crate) fn get_next_raw_interner(&self) -> &Self {
         unsafe { &*self.next_raw_interner.load(Ordering::Acquire) }
     }
@@ -431,7 +433,7 @@ where
             false
         }
     }
-
+    #[cold]
     pub(crate) fn create_and_stor_next_raw_interner(
         &self,
         hash_builder: &impl BuildHasher,
@@ -468,21 +470,16 @@ where
     ) {
         let mut raw_interner = self;
         loop {
-            match raw_interner.lock_slot_for_transfer(h2, hash) {
-                LockResult::ResizeNeeded => {
-                    raw_interner.create_and_stor_next_raw_interner(hash_builder);
-                    raw_interner = raw_interner.get_next_raw_interner();
-                }
-                LockResult::Moved => {
-                    raw_interner = raw_interner.get_next_raw_interner();
-                    continue;
-                }
-                LockResult::Locked(locked_data) => {
-                    raw_interner.unlock_and_set_value(hash, value, locked_data, hash_builder);
-                    break;
-                }
-                LockResult::Found(_) => panic!("can not be fund in new interner during transfer"),
+            let lock_result = raw_interner.lock_slot_for_transfer(h2, hash);
+            if let LockResult::Locked(locked_data) = lock_result {
+                raw_interner.unlock_and_set_value(hash, value, locked_data, hash_builder);
+                break;
             }
+            if let LockResult::ResizeNeeded = lock_result {
+                raw_interner.create_and_stor_next_raw_interner(hash_builder);
+            }
+            debug_assert!(!matches!(lock_result, LockResult::Found(_)));
+            raw_interner = raw_interner.get_next_raw_interner();
         }
     }
 }

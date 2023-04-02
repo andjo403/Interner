@@ -151,41 +151,29 @@ where
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         let mut is_current_interner = true;
         loop {
-            match raw_interner.lock_or_get_slot(hash, value) {
-                LockResult::Found(result) => {
-                    return result;
+            let lock_result = raw_interner.lock_or_get_slot(hash, value);
+            if let LockResult::Found(result) = lock_result {
+                return result;
+            }
+            if let LockResult::Locked(locked_data) = lock_result {
+                let result = make();
+                if raw_interner.unlock_and_set_value(hash, result, locked_data, &self.hash_builder)
+                    && is_current_interner
+                {
+                    self.current_raw_interner
+                        .store(raw_interner.get_next_moved_raw_interner_ptr(), Ordering::Relaxed);
                 }
-                LockResult::Locked(locked_data) => {
-                    let result = make();
-                    if raw_interner.unlock_and_set_value(
-                        hash,
-                        result,
-                        locked_data,
-                        &self.hash_builder,
-                    ) && is_current_interner
-                    {
-                        self.current_raw_interner.store(
-                            raw_interner.get_next_moved_raw_interner_ptr(),
-                            Ordering::Relaxed,
-                        );
-                    }
-                    return result;
-                }
-                LockResult::ResizeNeeded => {
-                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
-                        && is_current_interner
-                    {
-                        self.current_raw_interner.store(
-                            raw_interner.get_next_moved_raw_interner_ptr(),
-                            Ordering::Relaxed,
-                        );
-                    }
-                    raw_interner = raw_interner.get_next_raw_interner();
-                }
-                LockResult::Moved => {
-                    raw_interner = raw_interner.get_next_raw_interner();
+                return result;
+            }
+            if let LockResult::ResizeNeeded = lock_result {
+                if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
+                    && is_current_interner
+                {
+                    self.current_raw_interner
+                        .store(raw_interner.get_next_moved_raw_interner_ptr(), Ordering::Relaxed);
                 }
             }
+            raw_interner = raw_interner.get_next_raw_interner();
             is_current_interner = false;
         }
     }
@@ -216,41 +204,29 @@ where
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         let mut is_current_interner = true;
         loop {
-            match raw_interner.lock_or_get_slot(hash, &value) {
-                LockResult::Found(result) => {
-                    return result;
+            let lock_result = raw_interner.lock_or_get_slot(hash, &value);
+            if let LockResult::Found(result) = lock_result {
+                return result;
+            }
+            if let LockResult::Locked(locked_data) = lock_result {
+                let result = make(value);
+                if raw_interner.unlock_and_set_value(hash, result, locked_data, &self.hash_builder)
+                    && is_current_interner
+                {
+                    self.current_raw_interner
+                        .store(raw_interner.get_next_moved_raw_interner_ptr(), Ordering::Relaxed);
                 }
-                LockResult::Locked(locked_data) => {
-                    let result = make(value);
-                    if raw_interner.unlock_and_set_value(
-                        hash,
-                        result,
-                        locked_data,
-                        &self.hash_builder,
-                    ) && is_current_interner
-                    {
-                        self.current_raw_interner.store(
-                            raw_interner.get_next_moved_raw_interner_ptr(),
-                            Ordering::Relaxed,
-                        );
-                    }
-                    return result;
-                }
-                LockResult::ResizeNeeded => {
-                    if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
-                        && is_current_interner
-                    {
-                        self.current_raw_interner.store(
-                            raw_interner.get_next_moved_raw_interner_ptr(),
-                            Ordering::Relaxed,
-                        );
-                    }
-                    raw_interner = raw_interner.get_next_raw_interner();
-                }
-                LockResult::Moved => {
-                    raw_interner = raw_interner.get_next_raw_interner();
+                return result;
+            }
+            if let LockResult::ResizeNeeded = lock_result {
+                if raw_interner.create_and_stor_next_raw_interner(&self.hash_builder)
+                    && is_current_interner
+                {
+                    self.current_raw_interner
+                        .store(raw_interner.get_next_moved_raw_interner_ptr(), Ordering::Relaxed);
                 }
             }
+            raw_interner = raw_interner.get_next_raw_interner();
             is_current_interner = false;
         }
     }
