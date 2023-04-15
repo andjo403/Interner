@@ -4,8 +4,8 @@ use std::sync::atomic::{fence, AtomicU64, Ordering};
 const LOCKED_BIT: u8 = 0x80;
 const PARK_BIT: u8 = 0x40;
 
-const GROUP_FULL_BIT_MASK: u64 = 0x7f00_0000_0000_0000;
-const GROUP_MOVED_BIT_MASK: u64 = 0x8000_0000_0000_0000;
+const GROUP_FULL_BIT_MASK: u64 = 0xFE00_0000_0000_0000;
+const GROUP_MOVED_BIT_MASK: u64 = 0x0100_0000_0000_0000;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReserveResult {
     Reserved,
@@ -38,7 +38,7 @@ pub(crate) struct MetaData {
 
 #[inline]
 fn valid_bit(index: usize) -> u64 {
-    1 << (64 - 8 + index)
+    1 << (64 - 7 + index)
 }
 #[inline]
 pub(crate) fn test_valid_bit(group_meta_data: u64, index: usize) -> bool {
@@ -82,7 +82,7 @@ pub(crate) fn bucket_full(group_meta_data: u64) -> bool {
 
 #[inline]
 pub(crate) fn get_valid_bits(group_meta_data: u64) -> u8 {
-    ((group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 8)) as u8
+    ((group_meta_data & GROUP_FULL_BIT_MASK) >> (64 - 7)) as u8
 }
 
 impl MetaData {
@@ -211,9 +211,9 @@ mod tests {
         let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
         let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
         let result = meta_data.reserve(&mut group_meta_data, 0xFF, 1);
-        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_BFAB);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x200_0000_0000_BFAB);
         assert_eq!(result, ReserveResult::Reserved);
-        assert_eq!(group_meta_data, 0x100_0000_0000_BFAB);
+        assert_eq!(group_meta_data, 0x200_0000_0000_BFAB);
     }
 
     #[test]
@@ -221,9 +221,9 @@ mod tests {
         let meta_data = MetaData { meta_data: AtomicU64::new(valid_bit(0) | h2_bits(0xAB, 0)) };
         let mut group_meta_data = 0;
         let result = meta_data.reserve(&mut group_meta_data, 0xFC, 0);
-        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_00AB);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x200_0000_0000_00AB);
         assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-        assert_eq!(group_meta_data, 0x100_0000_0000_00AB);
+        assert_eq!(group_meta_data, 0x200_0000_0000_00AB);
         let result = meta_data.reserve(&mut group_meta_data, 0xAB, 0);
         assert_eq!(result, ReserveResult::OccupiedWithSameH2);
     }
@@ -237,9 +237,9 @@ mod tests {
         };
         let mut group_meta_data = 0;
         let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-        assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_AAAB);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x600_0000_0000_AAAB);
         assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-        assert_eq!(group_meta_data, 0x300_0000_0000_AAAB);
+        assert_eq!(group_meta_data, 0x600_0000_0000_AAAB);
     }
 
     #[test]
@@ -259,9 +259,9 @@ mod tests {
         };
         let mut group_meta_data = valid_bit(0) | h2_bits(0xAB, 0);
         let result = meta_data.reserve(&mut group_meta_data, 0xFC, 1);
-        assert_eq!(meta_data.get_metadata_acquire(), 0x100_0000_0000_ADAB);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x200_0000_0000_ADAB);
         assert_eq!(result, ReserveResult::AlreadyReservedWithOtherH2);
-        assert_eq!(group_meta_data, 0x100_0000_0000_ADAB);
+        assert_eq!(group_meta_data, 0x200_0000_0000_ADAB);
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         };
         let group_meta_data = valid_bit(0) | h2_bits(0xAB, 0) | h2_bits(0xAD, 1);
         meta_data.set_valid_and_unpark(group_meta_data, 0xAC, 1);
-        assert_eq!(meta_data.get_metadata_acquire(), 0x300_0000_0000_ACAB);
+        assert_eq!(meta_data.get_metadata_acquire(), 0x600_0000_0000_ACAB);
     }
 
     #[test]
