@@ -1,4 +1,4 @@
-use crate::atomic_wait::{wait, wake_all};
+use parking_lot_core::{self, DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN};
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 /// This bit is set instead of h2 if valid bit is not set when that mutex is locked by some thread.
 const LOCKED_BIT: u8 = 0x80;
@@ -86,6 +86,10 @@ pub(crate) fn get_valid_bits(group_meta_data: u64) -> u8 {
 }
 
 impl MetaData {
+    fn lock_addr(&self, index: usize) -> usize {
+        (&self.meta_data as *const _ as usize) + index
+    }
+
     #[inline]
     pub(crate) fn reserve(&self, group_meta_data: &mut u64, h2: u8, index: usize) -> ReserveResult {
         loop {
@@ -126,6 +130,11 @@ impl MetaData {
     #[cold]
     pub(crate) fn wait_on_lock_release(&self, out_meta_data: &mut u64, index: usize) {
         let mut group_meta_data = self.meta_data.load(Ordering::Relaxed);
+        let addr = self.lock_addr(index);
+        let validate = || !test_valid_bit(self.meta_data.load(Ordering::Relaxed), index);
+        let before_sleep = || {};
+        let timed_out = |_, _| {};
+
         loop {
             if test_valid_bit(group_meta_data, index) {
                 *out_meta_data = group_meta_data;
@@ -147,7 +156,22 @@ impl MetaData {
             }
 
             // Park our thread until we are woken up by an unlock
-            wait(&self.meta_data, index);
+
+            // SAFETY:
+            //   * `addr` is an address we control.
+            //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
+            //   * `before_sleep` does not call `park`, nor does it panic.
+            unsafe {
+                parking_lot_core::park(
+                    addr,
+                    validate,
+                    before_sleep,
+                    timed_out,
+                    DEFAULT_PARK_TOKEN,
+                    None,
+                );
+            }
+
             // Loop back and check if the valid bit was set
             group_meta_data = self.meta_data.load(Ordering::Relaxed);
         }
@@ -170,7 +194,12 @@ impl MetaData {
             ) {
                 Ok(_) => {
                     if test_park_bit(group_meta_data, index) {
-                        wake_all(&self.meta_data, index);
+                        let addr = self.lock_addr(index);
+                        // SAFETY:
+                        //   * `addr` is an address we control.
+                        unsafe {
+                            parking_lot_core::unpark_all(addr, DEFAULT_UNPARK_TOKEN);
+                        }
                     }
                     return bucket_moved(group_meta_data);
                 }
