@@ -1,7 +1,7 @@
 use super::bitmask::BitMaskIter;
 use std::simd::{u8x8, SimdPartialEq, ToBitMask};
 
-/// Returns a `BitMask` indicating all hash bytes in the group which have
+/// Returns a `BitMaskIter` indicating all hash bytes in the group which have
 /// the given value.
 #[inline]
 pub(crate) fn match_byte(valid_bits: u8, hashes: u64, value: u8) -> BitMaskIter {

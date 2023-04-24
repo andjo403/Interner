@@ -67,21 +67,16 @@ fn h2(hash: u64) -> u8 {
 ///
 /// Returns `None` if an overflow occurs.
 #[inline]
-fn capacity_to_buckets(cap: usize) -> Option<usize> {
-    // begin with 1/7 slot per bucket to be empty (85.7% load)
-    // and there is 7 elemnts per bucket
-    let adjusted_buckets = (cap.checked_mul(7)? + 5) / 6;
-
-    // Any overflows will have been caught by the checked_mul. Also, any
-    // rounding errors from the division above will be cleaned up by
-    // next_power_of_two (which can't overflow because of the previous divison).
-    Some(adjusted_buckets.next_power_of_two())
+fn capacity_to_buckets(cap: usize) -> usize {
+    // begin with one empty slot per bucket and there is 7 elemnts per bucket and round up.
+    let adjusted_buckets = (cap + 5) / 6;
+    adjusted_buckets.next_power_of_two()
 }
 
 /// Returns the maximum number of buckets to check before a resize is triggered.
 #[inline]
 fn buckets_to_resize_limit(buckets: usize) -> usize {
-    if buckets <= 64 { 1 } else { 4 }
+    usize::max(1, usize::min(buckets - 1, 32))
 }
 
 #[repr(align(64))]
@@ -228,9 +223,7 @@ impl<T> RawInterner<T> {
         if capacity == 0 {
             Self::new()
         } else {
-            let buckets =
-                capacity_to_buckets(capacity).expect("capacity to large to store in usize");
-            Self::new_uninitialized(buckets)
+            Self::new_uninitialized(capacity_to_buckets(capacity))
         }
     }
 
