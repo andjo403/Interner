@@ -1,4 +1,4 @@
-use crate::raw_interner::{make_hash, LockResult, RawInterner};
+use crate::raw_interner::{LockResult, RawInterner};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
@@ -147,7 +147,7 @@ where
         T: Borrow<Q> + Copy,
         Q: Hash + Eq,
     {
-        let hash = make_hash(&self.hash_builder, value);
+        let hash = self.hash_builder.hash_one(value);
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         let mut is_current_interner = true;
         loop {
@@ -200,7 +200,7 @@ where
         T: Borrow<Q> + Copy,
         Q: Hash + Eq,
     {
-        let hash = make_hash(&self.hash_builder, &value);
+        let hash = self.hash_builder.hash_one(&value);
         let mut raw_interner = unsafe { &*self.current_raw_interner.load(Ordering::Relaxed) };
         let mut is_current_interner = true;
         loop {
